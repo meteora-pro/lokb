@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 lokb (Local Offline Knowledge Base) — персональная offline библиотека знаний на Rust. Объединяет публичные данные (Wikipedia, Wikidata, книги, статьи) и личные (чаты, заметки, фото, GPS) в единую поисковую систему с поддержкой FTS, semantic search и knowledge graph.
 
-**Статус:** Pre-Phase 0. Код ещё не написан, есть только техническое задание в README.md.
+**Статус:** Early development. Минимальный CLI с файловым хранилищем и E2E Gherkin-тестами.
 
 ## Команды сборки и разработки
 
@@ -85,3 +85,25 @@ Composable цепочка PipelineStep: extractors → enrichers → transformer
 - **Embedding search опционален** — FTS и browse доступны сразу, vectors вычисляются в фоне
 - **Privacy levels** (Public/Internal/Private/Secret) — личные данные не смешиваются с публичными при export
 - Default embedding модель: `multilingual-e5-small` (384 dims, 120MB)
+- **Тесты на английском** — BDD feature files и test code на английском языке
+- **Conventional Commits** — `feat/`, `fix/`, `docs/`, `refactor/`, `test/`, `chore/`
+
+## Claude Code Skills
+
+| Skill | Команда | Описание |
+|---|---|---|
+| [solve-issue](.claude/skills/solve-issue/SKILL.md) | `/solve-issue <id>` | Полный цикл решения задачи: анализ → ветка → реализация → тесты → PR |
+| [review-pr](.claude/skills/review-pr/SKILL.md) | `/review-pr <id>` | Code review PR: анализ diffs, pipeline check, inline комментарии |
+| [fix-review-comments](.claude/skills/fix-review-comments/SKILL.md) | `/fix-review-comments <id>` | Исправить замечания из review и ответить на каждый комментарий |
+
+Skills используют DevBoy MCP server (`mcp__dev-boy_lokb__`) для работы с GitHub API.
+
+## E2E тесты
+
+```bash
+cargo test --test e2e -p lokb-cli   # запуск Gherkin-сценариев (cucumber-rs)
+```
+
+Feature файлы: `tests/features/*.feature`
+Fixtures: `tests/fixtures/` (Wikipedia markdown, Telegram JSON)
+Step definitions: `crates/lokb-cli/tests/e2e.rs`
