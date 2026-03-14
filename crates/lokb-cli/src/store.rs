@@ -1,66 +1,34 @@
+use chrono::Utc;
+use lokb_core::config;
+use lokb_core::{
+    ContentHash, ContentType, DataSource, DataSourceClass, PrivacyLevel, RawRetention, SyncStrategy,
+};
+use lokb_storage::{FileContentStore, SqliteCatalog};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
-/// Root data directory. Overridable via LOKB_DATA_DIR env var.
-pub fn data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("LOKB_DATA_DIR") {
-        PathBuf::from(dir)
-    } else {
-        dirs().default
+fn catalog_path() -> PathBuf {
+    config::derived_dir().join("catalog.sqlite")
+}
+
+fn open_catalog() -> io::Result<SqliteCatalog> {
+    let path = catalog_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
+    SqliteCatalog::open(&path).map_err(|e| io::Error::other(e.to_string()))
 }
 
-struct Dirs {
-    default: PathBuf,
-}
-
-fn dirs() -> Dirs {
-    let base = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    Dirs {
-        default: base.join(".local/share/lokb"),
-    }
-}
-
-fn sources_dir() -> PathBuf {
-    data_dir().join("sources")
-}
-
-fn source_dir() -> PathBuf {
-    data_dir().join("source")
-}
-
-fn derived_dir() -> PathBuf {
-    data_dir().join("derived")
-}
-
-fn cache_dir() -> PathBuf {
-    data_dir().join("cache")
-}
-
-/// Ensure the base directory structure exists.
-pub fn init_dirs() -> io::Result<()> {
-    for dir in [sources_dir(), source_dir(), derived_dir(), cache_dir()] {
-        fs::create_dir_all(dir)?;
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SourceConfig {
-    pub name: String,
-    pub raw_path: String,
-    pub format: String,
-    pub class: String,
-    pub document_count: u64,
+fn open_content_store() -> FileContentStore {
+    FileContentStore::new(config::source_content_dir().as_ref())
 }
 
 /// Save source config and ingest raw data.
 pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Result<()> {
-    init_dirs()?;
+    config::init_dirs()?;
 
     let raw_path = PathBuf::from(raw);
     if !raw_path.exists() {
@@ -70,31 +38,82 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
         ));
     }
 
-    let dest = source_dir().join(name);
-    fs::create_dir_all(&dest)?;
+    let catalog = open_catalog()?;
+    let content_store = open_content_store();
 
-    let doc_count = ingest_raw(&raw_path, format, &dest)?;
+    // Check if source already exists (ADR-006: reject, suggest update)
+    let existing = catalog
+        .get_source(name)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    if existing.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("source '{}' already exists", name),
+        ));
+    }
 
-    let config = SourceConfig {
-        name: name.to_string(),
-        raw_path: raw.to_string(),
-        format: format.to_string(),
-        class: class.to_string(),
-        document_count: doc_count,
+    let source_id = Uuid::now_v7();
+    let ds_class = match class {
+        "public" => DataSourceClass::Public {
+            license: None,
+            web_url_template: None,
+        },
+        "personal" => DataSourceClass::Personal {
+            owner: None,
+            platform: None,
+            contains_pii: true,
+        },
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown class: {class}. Use 'public' or 'personal'"),
+            ));
+        }
     };
 
-    let config_path = sources_dir().join(format!("{}.json", name));
-    let json = serde_json::to_string_pretty(&config).map_err(io::Error::other)?;
-    fs::write(config_path, json)?;
+    // Register source first (documents reference it via FK)
+    let source = DataSource {
+        id: source_id,
+        name: name.to_string(),
+        class: ds_class,
+        format: format.to_string(),
+        sync_strategy: SyncStrategy::default(),
+        raw_retention: RawRetention::default(),
+        priority: if class == "personal" { 250 } else { 100 },
+        document_count: 0,
+        created_at: Utc::now(),
+    };
+    catalog
+        .add_source(&source)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Ingest documents
+    let doc_count = ingest_raw(&raw_path, format, name, &content_store, source_id, &catalog)?;
+
+    // Update document count
+    catalog
+        .update_source_doc_count(source_id, doc_count)
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
     Ok(())
 }
 
-/// Ingest raw files into source directory. Returns document count.
-fn ingest_raw(raw_path: &Path, format: &str, dest: &Path) -> io::Result<u64> {
+/// Ingest raw files. Returns document count.
+fn ingest_raw(
+    raw_path: &Path,
+    format: &str,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
     match format {
-        "markdown-dir" => ingest_markdown_dir(raw_path, dest),
-        "telegram-export" => ingest_telegram(raw_path, dest),
+        "markdown-dir" => {
+            ingest_markdown_dir(raw_path, source_name, content_store, source_id, catalog)
+        }
+        "telegram-export" => {
+            ingest_telegram(raw_path, source_name, content_store, source_id, catalog)
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -102,15 +121,49 @@ fn ingest_raw(raw_path: &Path, format: &str, dest: &Path) -> io::Result<u64> {
     }
 }
 
-/// Copy markdown files into source directory.
-fn ingest_markdown_dir(raw_path: &Path, dest: &Path) -> io::Result<u64> {
+/// Copy markdown files and register documents in catalog.
+fn ingest_markdown_dir(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
     let mut count = 0;
     for entry in fs::read_dir(raw_path)? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "md") {
-            let file_name = path.file_name().unwrap();
-            fs::copy(&path, dest.join(file_name))?;
+            let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+            let content = fs::read_to_string(&path)?;
+            let external_id = file_name.trim_end_matches(".md").to_string();
+            let title = extract_doc_title(&content, &file_name);
+
+            // Copy file to content store
+            content_store
+                .copy_file(source_name, &path, &file_name)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+
+            // Register document in catalog (ADR-006: dedup by source_id + external_id)
+            let doc = lokb_core::Document {
+                id: Uuid::now_v7(),
+                source_id,
+                external_id,
+                parent_id: None,
+                depth: 0,
+                title,
+                content_type: ContentType::Article,
+                language: Some("en".to_string()),
+                content_hash: ContentHash::from_bytes(content.as_bytes()),
+                content_size: content.len() as u64,
+                created_at: Utc::now(),
+                indexed_at: Utc::now(),
+                privacy_level: PrivacyLevel::Public,
+            };
+            catalog
+                .upsert_document(&doc)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+
             count += 1;
         }
     }
@@ -118,7 +171,13 @@ fn ingest_markdown_dir(raw_path: &Path, dest: &Path) -> io::Result<u64> {
 }
 
 /// Parse Telegram export JSON and store messages as text documents.
-fn ingest_telegram(raw_path: &Path, dest: &Path) -> io::Result<u64> {
+fn ingest_telegram(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
     let json_path = raw_path.join("result.json");
     if !json_path.exists() {
         return Err(io::Error::new(
@@ -127,8 +186,8 @@ fn ingest_telegram(raw_path: &Path, dest: &Path) -> io::Result<u64> {
         ));
     }
 
-    let content = fs::read_to_string(&json_path)?;
-    let export: TelegramExport = serde_json::from_str(&content)
+    let raw_content = fs::read_to_string(&json_path)?;
+    let export: TelegramExport = serde_json::from_str(&raw_content)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     let chat_name = &export.name;
@@ -139,7 +198,6 @@ fn ingest_telegram(raw_path: &Path, dest: &Path) -> io::Result<u64> {
         if msg.r#type != "message" {
             continue;
         }
-        // Segment by 2-hour gaps
         if let Some(last) = current_segment.last()
             && time_gap_hours(&last.date, &msg.date) > 2.0
             && !current_segment.is_empty()
@@ -163,7 +221,31 @@ fn ingest_telegram(raw_path: &Path, dest: &Path) -> io::Result<u64> {
             text.push_str(&format!("{} [{}]: {}\n", from, time, msg_text));
         }
         let filename = format!("segment_{:04}.txt", i);
-        fs::write(dest.join(&filename), &text)?;
+        let external_id = format!("segment_{:04}", i);
+
+        content_store
+            .write_file(source_name, &filename, &text)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let doc = lokb_core::Document {
+            id: Uuid::now_v7(),
+            source_id,
+            external_id,
+            parent_id: None,
+            depth: 0,
+            title: format!("{} segment {}", chat_name, i),
+            content_type: ContentType::Conversation,
+            language: None,
+            content_hash: ContentHash::from_bytes(text.as_bytes()),
+            content_size: text.len() as u64,
+            created_at: Utc::now(),
+            indexed_at: Utc::now(),
+            privacy_level: PrivacyLevel::Private,
+        };
+        catalog
+            .upsert_document(&doc)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
         count += 1;
     }
 
@@ -171,7 +253,6 @@ fn ingest_telegram(raw_path: &Path, dest: &Path) -> io::Result<u64> {
 }
 
 fn time_gap_hours(a: &str, b: &str) -> f64 {
-    // Simple comparison: parse "2024-03-15T14:20:00" format
     let parse = |s: &str| -> Option<f64> {
         let parts: Vec<&str> = s.split('T').collect();
         if parts.len() != 2 {
@@ -197,7 +278,6 @@ fn time_gap_hours(a: &str, b: &str) -> f64 {
     }
 }
 
-/// Extract text from Telegram message text field (can be string or array).
 fn extract_text(text: &serde_json::Value) -> String {
     match text {
         serde_json::Value::String(s) => s.clone(),
@@ -232,28 +312,37 @@ struct TelegramMessage {
     text: serde_json::Value,
 }
 
-/// List all configured sources.
-pub fn list_sources() -> io::Result<Vec<SourceConfig>> {
-    let dir = sources_dir();
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut sources = vec![];
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "json") {
-            let content = fs::read_to_string(&path)?;
-            if let Ok(config) = serde_json::from_str::<SourceConfig>(&content) {
-                sources.push(config);
-            }
-        }
-    }
-    sources.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(sources)
+/// List all configured sources (from SQLite catalog).
+pub fn list_sources() -> io::Result<Vec<SourceListItem>> {
+    let catalog = open_catalog()?;
+    let sources = catalog
+        .list_sources()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(sources
+        .into_iter()
+        .map(|s| SourceListItem {
+            name: s.name,
+            format: s.format,
+            class: if s.class.is_public() {
+                "public".to_string()
+            } else {
+                "personal".to_string()
+            },
+            document_count: s.document_count,
+        })
+        .collect())
 }
 
-/// Search result from store.
+/// Source info for JSON output (backward compatible with E2E tests).
+#[derive(Debug, Serialize)]
+pub struct SourceListItem {
+    pub name: String,
+    pub format: String,
+    pub class: String,
+    pub document_count: u64,
+}
+
+/// Search result (backward compatible with E2E tests).
 #[derive(Debug, Serialize)]
 pub struct SearchResult {
     pub title: String,
@@ -268,38 +357,31 @@ pub fn search(
     personal_only: bool,
     public_only: bool,
 ) -> io::Result<Vec<SearchResult>> {
-    let sources = list_sources()?;
+    let catalog = open_catalog()?;
+    let content_store = open_content_store();
+    let sources = catalog
+        .list_sources()
+        .map_err(|e| io::Error::other(e.to_string()))?;
     let query_lower = query.to_lowercase();
     let mut results = vec![];
 
     for source in &sources {
-        if personal_only && source.class != "personal" {
+        if personal_only && source.class.is_public() {
             continue;
         }
-        if public_only && source.class != "public" {
-            continue;
-        }
-
-        let src_dir = source_dir().join(&source.name);
-        if !src_dir.exists() {
+        if public_only && source.class.is_personal() {
             continue;
         }
 
-        for entry in fs::read_dir(&src_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
+        let files = content_store
+            .list_files(&source.name)
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
-            let content = fs::read_to_string(&path).unwrap_or_default();
+        for (filename, content) in &files {
             let content_lower = content.to_lowercase();
-
             if let Some(pos) = content_lower.find(&query_lower) {
-                let title = extract_title(&content, &path);
-                let snippet = extract_snippet(&content, pos, 200);
-
-                // Simple scoring: count occurrences
+                let title = extract_doc_title(content, filename);
+                let snippet = extract_snippet(content, pos, 200);
                 let score = content_lower.matches(&query_lower).count() as f64;
 
                 results.push(SearchResult {
@@ -320,26 +402,23 @@ pub fn search(
     Ok(results)
 }
 
-fn extract_title(content: &str, path: &Path) -> String {
-    // Try to get first markdown heading
+fn extract_doc_title(content: &str, filename: &str) -> String {
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(heading) = trimmed.strip_prefix("# ") {
             return heading.to_string();
         }
     }
-    // Fallback to filename
-    path.file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Untitled".to_string())
+    filename
+        .trim_end_matches(".md")
+        .trim_end_matches(".txt")
+        .to_string()
 }
 
 fn extract_snippet(content: &str, pos: usize, max_len: usize) -> String {
     let start = pos.saturating_sub(max_len / 2);
     let end = (pos + max_len / 2).min(content.len());
-
     let snippet = &content[start..end];
-    // Trim to word boundaries
     let snippet = snippet.trim();
     if start > 0 {
         format!("...{snippet}...")
@@ -360,51 +439,44 @@ pub fn read_document(doc_ref: &str) -> io::Result<String> {
         ));
     }
     let (source_name, doc_id) = (parts[0], parts[1]);
-    let src_dir = source_dir().join(source_name);
+    let content_store = open_content_store();
 
-    // Try exact filename match with common extensions
-    for ext in ["md", "txt", ""] {
-        let filename = if ext.is_empty() {
-            doc_id.to_string()
-        } else {
-            format!("{}.{}", doc_id, ext)
-        };
-        let path = src_dir.join(&filename);
-        if path.exists() {
-            return fs::read_to_string(path);
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!(
-            "document '{}' not found in source '{}'",
-            doc_id, source_name
-        ),
-    ))
+    content_store
+        .read_by_filename(source_name, doc_id)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "document '{}' not found in source '{}'",
+                    doc_id, source_name
+                ),
+            )
+        })
 }
 
 /// Storage layer stats.
 #[derive(Debug, Serialize)]
-pub struct StorageLayer {
+pub struct StorageLayerInfo {
     pub name: String,
     pub size_bytes: u64,
 }
 
 /// Calculate storage status.
-pub fn storage_status() -> io::Result<Vec<StorageLayer>> {
+pub fn storage_status() -> io::Result<Vec<StorageLayerInfo>> {
+    let content_store = open_content_store();
     Ok(vec![
-        StorageLayer {
+        StorageLayerInfo {
             name: "source".to_string(),
-            size_bytes: dir_size(&source_dir()),
+            size_bytes: content_store.total_size(),
         },
-        StorageLayer {
+        StorageLayerInfo {
             name: "derived".to_string(),
-            size_bytes: dir_size(&derived_dir()),
+            size_bytes: dir_size(config::derived_dir().as_ref()),
         },
-        StorageLayer {
+        StorageLayerInfo {
             name: "cache".to_string(),
-            size_bytes: dir_size(&cache_dir()),
+            size_bytes: dir_size(config::cache_dir().as_ref()),
         },
     ])
 }
@@ -430,21 +502,20 @@ fn dir_size(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Export public sources to a tar.zst file.
+/// Export public sources.
 pub fn export(output: &str, include_personal: bool) -> io::Result<()> {
-    let sources = list_sources()?;
+    let catalog = open_catalog()?;
+    let sources = catalog
+        .list_sources()
+        .map_err(|e| io::Error::other(e.to_string()))?;
     let output_path = PathBuf::from(output);
 
-    // Collect files to export
-    let mut exported_sources: Vec<String> = vec![];
-    for source in &sources {
-        if !include_personal && source.class == "personal" {
-            continue;
-        }
-        exported_sources.push(source.name.clone());
-    }
+    let exported_sources: Vec<String> = sources
+        .iter()
+        .filter(|s| include_personal || s.class.is_exportable())
+        .map(|s| s.name.clone())
+        .collect();
 
-    // Create a simple manifest as the export (tar.zst would need extra deps)
     let manifest = serde_json::json!({
         "version": "0.1.0",
         "sources": exported_sources,

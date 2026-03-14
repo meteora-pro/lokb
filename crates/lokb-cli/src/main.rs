@@ -133,7 +133,7 @@ fn run_source(command: SourceCommands) -> Result<(), Box<dyn std::error::Error>>
             } else {
                 for s in &sources {
                     println!(
-                        "{:<20} {:<15} {:<10} {} docs",
+                        "{:<20} {:<15} {:<10} {} doc(s)",
                         s.name, s.format, s.class, s.document_count
                     );
                 }
