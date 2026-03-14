@@ -1,0 +1,9 @@
+[package]
+name = "lokb-graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Entity resolution, relations"
+
+[dependencies]
+lokb-core = { workspace = true }

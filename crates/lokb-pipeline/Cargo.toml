@@ -1,0 +1,11 @@
+[package]
+name = "lokb-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pipeline framework: OptimizeStep, EnrichmentStep, CrossSourceStep traits"
+
+[dependencies]
+lokb-core = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }

@@ -1,0 +1,9 @@
+[package]
+name = "lokb-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Query engine, hybrid search, RRF"
+
+[dependencies]
+lokb-core = { workspace = true }

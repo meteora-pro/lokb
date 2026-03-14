@@ -1,0 +1,9 @@
+[package]
+name = "lokb-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LLM backends (Ollama, ONNX, OpenAI-compatible)"
+
+[dependencies]
+lokb-core = { workspace = true }
