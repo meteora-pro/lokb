@@ -107,3 +107,15 @@ cargo test --test e2e -p lokb-cli   # запуск Gherkin-сценариев (c
 Feature файлы: `tests/features/*.feature`
 Fixtures: `tests/fixtures/` (Wikipedia markdown, Telegram JSON)
 Step definitions: `crates/lokb-cli/tests/e2e.rs`
+
+## Документация
+
+Документация на [Rspress](https://rspress.dev/) с автодеплоем на GitHub Pages.
+
+```bash
+cd docs && pnpm install && pnpm dev   # локальная разработка
+cd docs && pnpm build                  # сборка
+```
+
+Структура: `docs/guide/` — контент, `docs/rspress.config.ts` — конфиг.
+Деплой: `.github/workflows/deploy-docs.yml` при push в main (path: `docs/**`).

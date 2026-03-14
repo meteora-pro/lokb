@@ -1,0 +1,6 @@
+[
+  { "text": "Getting started", "link": "/getting-started/" },
+  { "text": "Architecture", "link": "/architecture/" },
+  { "text": "CLI Reference", "link": "/cli/" },
+  { "text": "Development", "link": "/development/" }
+]
