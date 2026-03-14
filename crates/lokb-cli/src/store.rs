@@ -172,9 +172,16 @@ fn ingest_telegram(raw_path: &Path, dest: &Path) -> io::Result<u64> {
     Ok(count)
 }
 
+/// Approximate conversion constants used in `time_gap_hours`.
+/// These are intentionally approximate — production code should use `chrono`.
+const HOURS_PER_DAY: f64 = 24.0;
+const DAYS_PER_MONTH_APPROX: f64 = 30.0;
+const DAYS_PER_YEAR_APPROX: f64 = 365.0;
+
 fn time_gap_hours(a: &str, b: &str) -> f64 {
-    // Parse "2024-03-15T14:20:00" format into approximate total hours.
-    // Month and year are included to handle cross-month/year boundaries.
+    // Parse "2024-03-15T14:20:00" format into an approximate total-hours value.
+    // Uses fixed-length months (30 days) and years (365 days), so results near
+    // month/year boundaries are approximate but sufficient for 2-hour segmentation.
     let parse = |s: &str| -> Option<f64> {
         let (date_part, time_part) = s.split_once('T')?;
         let mut date_parts = date_part.split('-');
@@ -184,8 +191,13 @@ fn time_gap_hours(a: &str, b: &str) -> f64 {
         let mut time_parts = time_part.split(':');
         let hours: f64 = time_parts.next()?.parse().ok()?;
         let minutes: f64 = time_parts.next()?.parse().ok()?;
-        // Approximate: 365 days/year, 30 days/month
-        Some(year * 365.0 * 24.0 + month * 30.0 * 24.0 + day * 24.0 + hours + minutes / 60.0)
+        Some(
+            year * DAYS_PER_YEAR_APPROX * HOURS_PER_DAY
+                + month * DAYS_PER_MONTH_APPROX * HOURS_PER_DAY
+                + day * HOURS_PER_DAY
+                + hours
+                + minutes / 60.0,
+        )
     };
 
     match (parse(a), parse(b)) {
@@ -336,13 +348,9 @@ fn extract_snippet(content: &str, pos: usize, max_len: usize) -> String {
     let raw_end = (pos + max_len / 2).min(content.len());
 
     // Snap to valid UTF-8 char boundaries so slicing never panics on non-ASCII text.
-    let start = (0..=raw_start)
-        .rev()
-        .find(|&i| content.is_char_boundary(i))
-        .unwrap_or(0);
-    let end = (raw_end..=content.len())
-        .find(|&i| content.is_char_boundary(i))
-        .unwrap_or(content.len());
+    // `floor_char_boundary` / `ceil_char_boundary` scan at most 3 bytes (max UTF-8 width - 1).
+    let start = content.floor_char_boundary(raw_start);
+    let end = content.ceil_char_boundary(raw_end);
 
     let snippet = content[start..end].trim();
     if start > 0 {
