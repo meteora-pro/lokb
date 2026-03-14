@@ -69,6 +69,14 @@ enum SourceCommands {
         #[arg(long)]
         class: String,
     },
+    /// Update an existing source with new data
+    Update {
+        /// Source name
+        name: String,
+        /// Path to raw data
+        #[arg(long)]
+        raw: String,
+    },
     /// List all sources
     List {
         /// Output format
@@ -122,6 +130,14 @@ fn run_source(command: SourceCommands) -> Result<(), Box<dyn std::error::Error>>
         } => {
             store::add_source(&name, &raw, &format, &class)?;
             println!("Source '{}' added successfully", name);
+        }
+        SourceCommands::Update { name, raw } => {
+            let report = store::update_source(&name, &raw)?;
+            println!("Source '{}' updated:", name);
+            println!("  New:       {}", report.new_count);
+            println!("  Changed:   {}", report.changed_count);
+            println!("  Unchanged: {}", report.unchanged_count);
+            println!("  Deleted:   {}", report.deleted_count);
         }
         SourceCommands::List { format } => {
             let sources = store::list_sources()?;

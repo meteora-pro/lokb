@@ -199,6 +199,54 @@ impl SqliteCatalog {
         }
     }
 
+    /// Get content hash for a document by external_id (for incremental update, ADR-006).
+    pub fn get_content_hash(
+        &self,
+        source_id: DataSourceId,
+        external_id: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT content_hash FROM documents WHERE source_id = ?1 AND external_id = ?2")
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        let result = stmt
+            .query_row(params![source_id.to_string(), external_id], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })
+            .optional()
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(result)
+    }
+
+    /// Get all external_ids for a source (for diff detection, ADR-006).
+    pub fn list_external_ids(&self, source_id: DataSourceId) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT external_id FROM documents WHERE source_id = ?1")
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![source_id.to_string()], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            ids.push(row.map_err(|e| lokb_core::Error::Storage(e.to_string()))?);
+        }
+        Ok(ids)
+    }
+
+    /// Delete a document by source_id + external_id.
+    pub fn delete_by_external_id(&self, source_id: DataSourceId, external_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM documents WHERE source_id = ?1 AND external_id = ?2",
+            params![source_id.to_string(), external_id],
+        )
+        .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     pub fn document_count(&self, source_id: DataSourceId) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn

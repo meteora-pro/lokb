@@ -148,6 +148,217 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
     Ok(())
 }
 
+/// Report from incremental update (ADR-006).
+pub struct UpdateReport {
+    pub new_count: u64,
+    pub changed_count: u64,
+    pub unchanged_count: u64,
+    pub deleted_count: u64,
+}
+
+/// Incremental update of an existing source (ADR-006).
+/// Compares content hashes, only processes new/changed documents.
+pub fn update_source(name: &str, raw: &str) -> io::Result<UpdateReport> {
+    config::init_dirs()?;
+
+    let raw_path = PathBuf::from(raw);
+    if !raw_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("raw path not found: {}", raw),
+        ));
+    }
+
+    let catalog = open_catalog()?;
+    let content_store = open_content_store();
+    let fts = open_fts()?;
+
+    let source = catalog
+        .get_source(name)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("source '{}' not found. Use 'source add' first.", name),
+            )
+        })?;
+
+    // Collect new raw files with their content hashes
+    let new_files = scan_raw_files(&raw_path, &source.format)?;
+
+    // Get existing external_ids from catalog
+    let existing_ids: std::collections::HashSet<String> = catalog
+        .list_external_ids(source.id)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .into_iter()
+        .collect();
+
+    let chunker = SemanticChunker::default();
+    let ctx = IngestContext {
+        source_name: name,
+        source: &source,
+        content_store: &content_store,
+        catalog: &catalog,
+        fts: &fts,
+        chunker: &chunker,
+    };
+
+    let mut new_count = 0u64;
+    let mut changed_count = 0u64;
+    let mut unchanged_count = 0u64;
+
+    let seen_ids: std::collections::HashSet<String> =
+        new_files.iter().map(|f| f.external_id.clone()).collect();
+
+    for file_info in &new_files {
+        let existing_hash = catalog
+            .get_content_hash(source.id, &file_info.external_id)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let new_hash = ContentHash::from_bytes(file_info.content.as_bytes());
+
+        match existing_hash {
+            None => {
+                // New document
+                ingest_single_file(
+                    &file_info.external_id,
+                    &file_info.filename,
+                    &file_info.content,
+                    &ctx,
+                )?;
+                new_count += 1;
+            }
+            Some(old_hash) if old_hash != new_hash.0.as_slice() => {
+                // Changed document — re-ingest
+                ingest_single_file(
+                    &file_info.external_id,
+                    &file_info.filename,
+                    &file_info.content,
+                    &ctx,
+                )?;
+                changed_count += 1;
+            }
+            _ => {
+                unchanged_count += 1;
+            }
+        }
+    }
+
+    // Detect deleted documents
+    let deleted_count = existing_ids.difference(&seen_ids).count() as u64;
+    for deleted_id in existing_ids.difference(&seen_ids) {
+        catalog
+            .delete_by_external_id(source.id, deleted_id)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+    }
+
+    // Update document count
+    let total = catalog
+        .document_count(source.id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    catalog
+        .update_source_doc_count(source.id, total)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    Ok(UpdateReport {
+        new_count,
+        changed_count,
+        unchanged_count,
+        deleted_count,
+    })
+}
+
+struct RawFileInfo {
+    external_id: String,
+    filename: String,
+    content: String,
+}
+
+/// Scan raw files and return their external_ids + content.
+fn scan_raw_files(raw_path: &Path, format: &str) -> io::Result<Vec<RawFileInfo>> {
+    match format {
+        "markdown-dir" => {
+            let mut files = vec![];
+            for entry in fs::read_dir(raw_path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "md") {
+                    let filename = path.file_name().unwrap().to_string_lossy().to_string();
+                    let external_id = filename.trim_end_matches(".md").to_string();
+                    let content = fs::read_to_string(&path)?;
+                    files.push(RawFileInfo {
+                        external_id,
+                        filename,
+                        content,
+                    });
+                }
+            }
+            Ok(files)
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("incremental update not supported for format: {format}"),
+        )),
+    }
+}
+
+struct IngestContext<'a> {
+    source_name: &'a str,
+    source: &'a DataSource,
+    content_store: &'a FileContentStore,
+    catalog: &'a SqliteCatalog,
+    fts: &'a TantivyIndex,
+    chunker: &'a SemanticChunker,
+}
+
+/// Ingest a single file: write to content store, register in catalog, chunk, index.
+fn ingest_single_file(
+    external_id: &str,
+    filename: &str,
+    content: &str,
+    ctx: &IngestContext<'_>,
+) -> io::Result<()> {
+    let title = extract_doc_title(content, filename);
+
+    ctx.content_store
+        .write_file(ctx.source_name, filename, content)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let doc = lokb_core::Document {
+        id: Uuid::now_v7(),
+        source_id: ctx.source.id,
+        external_id: external_id.to_string(),
+        parent_id: None,
+        depth: 0,
+        title: title.clone(),
+        content_type: ContentType::Article,
+        language: Some("en".to_string()),
+        content_hash: ContentHash::from_bytes(content.as_bytes()),
+        content_size: content.len() as u64,
+        created_at: Utc::now(),
+        indexed_at: Utc::now(),
+        privacy_level: if ctx.source.class.is_personal() {
+            PrivacyLevel::Private
+        } else {
+            PrivacyLevel::Public
+        },
+    };
+
+    ctx.catalog
+        .upsert_document(&doc)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let chunks = ctx
+        .chunker
+        .chunk(&doc, content)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    ctx.fts
+        .index_chunks(&chunks, ctx.source_name, &title)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    Ok(())
+}
+
 /// Ingest raw files. Returns document count.
 fn ingest_raw(
     raw_path: &Path,
