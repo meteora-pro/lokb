@@ -3,6 +3,9 @@ use lokb_core::config;
 use lokb_core::{
     ContentHash, ContentType, DataSource, DataSourceClass, PrivacyLevel, RawRetention, SyncStrategy,
 };
+use lokb_ingest::SemanticChunker;
+use lokb_pipeline::Chunker;
+use lokb_search::TantivyIndex;
 use lokb_storage::{FileContentStore, SqliteCatalog};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -12,6 +15,10 @@ use uuid::Uuid;
 
 fn catalog_path() -> PathBuf {
     config::derived_dir().join("catalog.sqlite")
+}
+
+fn fts_path() -> PathBuf {
+    config::derived_dir().join("fts")
 }
 
 fn open_catalog() -> io::Result<SqliteCatalog> {
@@ -24,6 +31,10 @@ fn open_catalog() -> io::Result<SqliteCatalog> {
 
 fn open_content_store() -> FileContentStore {
     FileContentStore::new(config::source_content_dir().as_ref())
+}
+
+fn open_fts() -> io::Result<TantivyIndex> {
+    TantivyIndex::open(&fts_path()).map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// Save source config and ingest raw data.
@@ -94,6 +105,45 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
     catalog
         .update_source_doc_count(source_id, doc_count)
         .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Chunk documents and build FTS index
+    let fts = open_fts()?;
+    let chunker = SemanticChunker::default();
+    let files = content_store
+        .list_files(name)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    for (filename, content) in &files {
+        let title = extract_doc_title(content, filename);
+        let doc = lokb_core::Document {
+            id: Uuid::now_v7(),
+            source_id,
+            external_id: filename.clone(),
+            parent_id: None,
+            depth: 0,
+            title: title.clone(),
+            content_type: if format == "telegram-export" {
+                ContentType::Conversation
+            } else {
+                ContentType::Article
+            },
+            language: None,
+            content_hash: ContentHash::from_bytes(content.as_bytes()),
+            content_size: content.len() as u64,
+            created_at: Utc::now(),
+            indexed_at: Utc::now(),
+            privacy_level: if class == "personal" {
+                PrivacyLevel::Private
+            } else {
+                PrivacyLevel::Public
+            },
+        };
+        let chunks = chunker
+            .chunk(&doc, content)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        fts.index_chunks(&chunks, name, &title)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+    }
 
     Ok(())
 }
@@ -351,55 +401,29 @@ pub struct SearchResult {
     pub score: f64,
 }
 
-/// Simple text search across all documents.
+/// Full-text search via Tantivy BM25.
 pub fn search(
     query: &str,
     personal_only: bool,
     public_only: bool,
 ) -> io::Result<Vec<SearchResult>> {
-    let catalog = open_catalog()?;
-    let content_store = open_content_store();
-    let sources = catalog
-        .list_sources()
+    let fts = open_fts()?;
+    let hits = fts
+        .search(query, 20, None, personal_only, public_only)
         .map_err(|e| io::Error::other(e.to_string()))?;
-    let query_lower = query.to_lowercase();
-    let mut results = vec![];
 
-    for source in &sources {
-        if personal_only && source.class.is_public() {
-            continue;
-        }
-        if public_only && source.class.is_personal() {
-            continue;
-        }
-
-        let files = content_store
-            .list_files(&source.name)
-            .map_err(|e| io::Error::other(e.to_string()))?;
-
-        for (filename, content) in &files {
-            let content_lower = content.to_lowercase();
-            if let Some(pos) = content_lower.find(&query_lower) {
-                let title = extract_doc_title(content, filename);
-                let snippet = extract_snippet(content, pos, 200);
-                let score = content_lower.matches(&query_lower).count() as f64;
-
-                results.push(SearchResult {
-                    title,
-                    source: source.name.clone(),
-                    snippet,
-                    score,
-                });
+    Ok(hits
+        .into_iter()
+        .map(|hit| {
+            let snippet = extract_snippet(&hit.text, 0, 200);
+            SearchResult {
+                title: hit.title,
+                source: hit.source_name,
+                snippet,
+                score: hit.score as f64,
             }
-        }
-    }
-
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    Ok(results)
+        })
+        .collect())
 }
 
 fn extract_doc_title(content: &str, filename: &str) -> String {
