@@ -1,0 +1,48 @@
+{
+  "name": "lokb",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.cargo.allTargets": true,
+        "editor.formatOnSave": true,
+        "[rust]": {
+          "editor.defaultFormatter": "rust-lang.rust-analyzer"
+        }
+      },
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "vadimcn.vscode-lldb",
+        "tamasfe.even-better-toml",
+        "fill-labs.dependi",
+        "serayuzgur.crates"
+      ]
+    }
+  },
+  "forwardPorts": [7890],
+  "portsAttributes": {
+    "7890": {
+      "label": "lokb serve",
+      "onAutoForward": "notify"
+    }
+  },
+  "containerEnv": {
+    "RUST_BACKTRACE": "1",
+    "RUST_LOG": "info"
+  },
+  "mounts": [
+    "source=lokb-cargo-registry,target=/usr/local/cargo/registry,type=volume",
+    "source=lokb-cargo-git,target=/usr/local/cargo/git,type=volume",
+    "source=lokb-target,target=${containerWorkspaceFolder}/target,type=volume"
+  ],
+  "postCreateCommand": "npm install -g @anthropic-ai/claude-code && cargo fetch 2>/dev/null || true"
+}
