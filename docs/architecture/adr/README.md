@@ -8,3 +8,4 @@
 | [004](004-core-entities.md) | Core domain entities | Accepted |
 | [005](005-extension-model.md) | Extension model: traits and plugin points | Accepted |
 | [006](006-incremental-loading-deduplication.md) | Incremental loading and deduplication | Accepted |
+| [007](007-datasource-pipelines-reference.md) | DataSource pipelines reference — 11 concrete implementations | Accepted |
