@@ -4,7 +4,10 @@
     "dockerfile": "Dockerfile"
   },
   "features": {
-    "ghcr.io/devcontainers/features/github-cli:1": {}
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "lts"
+    }
   },
   "customizations": {
     "vscode": {
@@ -41,5 +44,5 @@
     "source=lokb-cargo-git,target=/usr/local/cargo/git,type=volume",
     "source=lokb-target,target=${containerWorkspaceFolder}/target,type=volume"
   ],
-  "postCreateCommand": "cargo fetch 2>/dev/null || true"
+  "postCreateCommand": "npm install -g @anthropic-ai/claude-code && cargo fetch 2>/dev/null || true"
 }
