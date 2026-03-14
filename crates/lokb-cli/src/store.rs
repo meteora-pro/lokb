@@ -37,8 +37,36 @@ fn open_fts() -> io::Result<TantivyIndex> {
     TantivyIndex::open(&fts_path()).map_err(|e| io::Error::other(e.to_string()))
 }
 
-/// Save source config and ingest raw data.
-pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Result<()> {
+/// Metrics collected during source ingestion (ADR-002, ADR-003).
+#[derive(Debug, Serialize)]
+pub struct IngestMetrics {
+    /// Total raw input size in bytes
+    pub raw_input_bytes: u64,
+    /// Total optimized output size in bytes
+    pub optimized_bytes: u64,
+    /// Compression ratio (raw / optimized)
+    pub compression_ratio: f64,
+    /// Number of documents processed
+    pub documents_processed: u64,
+    /// Number of chunks created
+    pub chunks_created: u64,
+    /// FTS index size after ingestion in bytes
+    pub fts_index_bytes: u64,
+    /// Total storage overhead from enrichment (FTS + catalog)
+    pub enrichment_overhead_bytes: u64,
+    /// Wall-clock time for optimize phase (ms)
+    pub optimize_time_ms: u64,
+    /// Wall-clock time for enrichment phase (ms)
+    pub enrichment_time_ms: u64,
+    /// Total wall-clock time (ms)
+    pub total_time_ms: u64,
+}
+
+/// Save source config and ingest raw data. Returns metrics.
+pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Result<IngestMetrics> {
+    use std::time::Instant;
+    let total_start = Instant::now();
+
     config::init_dirs()?;
 
     let raw_path = PathBuf::from(raw);
@@ -48,6 +76,8 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
             format!("raw path not found: {}", raw),
         ));
     }
+
+    let raw_input_bytes = dir_size(&raw_path);
 
     let catalog = open_catalog()?;
     let content_store = open_content_store();
@@ -98,16 +128,20 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
         .add_source(&source)
         .map_err(|e| io::Error::other(e.to_string()))?;
 
-    // Ingest documents
+    // Phase 1: Optimize — ingest raw files into content store
+    let optimize_start = Instant::now();
     let doc_count = ingest_raw(&raw_path, format, name, &content_store, source_id, &catalog)?;
+    let optimize_time = optimize_start.elapsed();
 
     // Update document count
     catalog
         .update_source_doc_count(source_id, doc_count)
         .map_err(|e| io::Error::other(e.to_string()))?;
 
-    // Chunk documents and build FTS index
-    // Chunk and index in batch (single Tantivy commit for performance)
+    let optimized_bytes = content_store.source_size(name);
+
+    // Phase 2: Enrichment — chunk and build FTS index (single commit)
+    let enrichment_start = std::time::Instant::now();
     let fts = open_fts()?;
     let chunker = SemanticChunker::default();
     let mut fts_writer = fts.writer().map_err(|e| io::Error::other(e.to_string()))?;
@@ -149,11 +183,30 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
             .map_err(|e| io::Error::other(e.to_string()))?;
     }
 
-    fts_writer
+    let chunks_created = fts_writer
         .commit()
-        .map_err(|e| io::Error::other(e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))? as u64;
+    let enrichment_time = enrichment_start.elapsed();
 
-    Ok(())
+    let fts_index_bytes = dir_size(&fts_path());
+    let total_time = total_start.elapsed();
+
+    Ok(IngestMetrics {
+        raw_input_bytes,
+        optimized_bytes,
+        compression_ratio: if optimized_bytes > 0 {
+            raw_input_bytes as f64 / optimized_bytes as f64
+        } else {
+            0.0
+        },
+        documents_processed: doc_count,
+        chunks_created,
+        fts_index_bytes,
+        enrichment_overhead_bytes: fts_index_bytes + dir_size(&catalog_path()),
+        optimize_time_ms: optimize_time.as_millis() as u64,
+        enrichment_time_ms: enrichment_time.as_millis() as u64,
+        total_time_ms: total_time.as_millis() as u64,
+    })
 }
 
 /// Report from incremental update (ADR-006).

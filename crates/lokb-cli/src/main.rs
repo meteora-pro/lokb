@@ -128,8 +128,25 @@ fn run_source(command: SourceCommands) -> Result<(), Box<dyn std::error::Error>>
             format,
             class,
         } => {
-            store::add_source(&name, &raw, &format, &class)?;
+            let metrics = store::add_source(&name, &raw, &format, &class)?;
             println!("Source '{}' added successfully", name);
+            println!(
+                "  Documents: {}  Chunks: {}",
+                metrics.documents_processed, metrics.chunks_created
+            );
+            println!(
+                "  Optimize:  {:.1}s ({} → {} bytes, {:.1}x compression)",
+                metrics.optimize_time_ms as f64 / 1000.0,
+                metrics.raw_input_bytes,
+                metrics.optimized_bytes,
+                metrics.compression_ratio
+            );
+            println!(
+                "  Enrichment: {:.1}s (FTS index: {} bytes)",
+                metrics.enrichment_time_ms as f64 / 1000.0,
+                metrics.fts_index_bytes
+            );
+            println!("  Total: {:.1}s", metrics.total_time_ms as f64 / 1000.0);
         }
         SourceCommands::Update { name, raw } => {
             let report = store::update_source(&name, &raw)?;
