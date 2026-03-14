@@ -1,0 +1,79 @@
+{
+  "name": "Travel Chat",
+  "type": "personal_chat",
+  "id": 123456789,
+  "messages": [
+    {
+      "id": 1,
+      "type": "message",
+      "date": "2024-03-15T14:20:00",
+      "from": "Alice",
+      "from_id": "user100",
+      "text": "Has anyone been to that new Italian restaurant near the Eiffel Tower?"
+    },
+    {
+      "id": 2,
+      "type": "message",
+      "date": "2024-03-15T14:21:00",
+      "from": "Bob",
+      "from_id": "user200",
+      "text": "Yes! We went there last weekend. The pasta was amazing."
+    },
+    {
+      "id": 3,
+      "type": "message",
+      "date": "2024-03-15T14:22:00",
+      "from": "Alice",
+      "from_id": "user100",
+      "text": "Nice! How about the prices?"
+    },
+    {
+      "id": 4,
+      "type": "message",
+      "date": "2024-03-15T14:23:00",
+      "from": "Bob",
+      "from_id": "user200",
+      "text": "Reasonable for Paris. About 25 euros per person for a full meal."
+    },
+    {
+      "id": 5,
+      "type": "message",
+      "date": "2024-03-15T16:00:00",
+      "from": "Alice",
+      "from_id": "user100",
+      "text": "Planning a trip to France next month. Any recommendations?"
+    },
+    {
+      "id": 6,
+      "type": "message",
+      "date": "2024-03-15T16:05:00",
+      "from": "Bob",
+      "from_id": "user200",
+      "text": "Definitely visit the Louvre and walk along the Seine. Also try the local bakeries."
+    },
+    {
+      "id": 7,
+      "type": "message",
+      "date": "2024-03-16T10:00:00",
+      "from": "Charlie",
+      "from_id": "user300",
+      "text": "I just finished reading about quantum computing. Fascinating stuff!"
+    },
+    {
+      "id": 8,
+      "type": "message",
+      "date": "2024-03-16T10:05:00",
+      "from": "Alice",
+      "from_id": "user100",
+      "text": "Is it true that quantum computers can break encryption?"
+    },
+    {
+      "id": 9,
+      "type": "message",
+      "date": "2024-03-16T10:10:00",
+      "from": "Charlie",
+      "from_id": "user300",
+      "text": "In theory yes, but current quantum computers are not powerful enough yet."
+    }
+  ]
+}
