@@ -31,14 +31,14 @@ mcp__dev-boy_lokb__get_merge_requests({ state: "opened" })
 ### Шаг 1.1: Получить PR details
 
 ```
-mcp__dev-boy_lokb__get_merge_request_diffs({ merge_request_id: "{pr_number}" })
-mcp__dev-boy_lokb__get_merge_request_discussions({ merge_request_id: "{pr_number}" })
+mcp__dev-boy_lokb__get_merge_request_diffs({ merge_request_id: "gh#{pr_number}" })
+mcp__dev-boy_lokb__get_merge_request_discussions({ merge_request_id: "gh#{pr_number}" })
 ```
 
 ### Шаг 1.2: Проверить pipeline
 
 ```
-mcp__dev-boy_lokb__get_merge_request_pipeline({ merge_request_id: "{pr_number}" })
+mcp__dev-boy_lokb__get_merge_request_pipeline({ merge_request_id: "gh#{pr_number}" })
 ```
 
 **Если pipeline failed** — отметить как CRITICAL blocker в summary.
@@ -48,7 +48,7 @@ mcp__dev-boy_lokb__get_merge_request_pipeline({ merge_request_id: "{pr_number}" 
 Извлечь номер issue из описания PR (паттерн `Closes #N`). Если найден:
 
 ```
-mcp__dev-boy_lokb__get_issue({ issue_id: "{issue_id}" })
+mcp__dev-boy_lokb__get_issue({ issueKey: "gh#{issue_id}" })
 ```
 
 ## Фаза 2: Анализ кода
@@ -96,7 +96,7 @@ mcp__dev-boy_lokb__get_issue({ issue_id: "{issue_id}" })
 
 ```
 mcp__dev-boy_lokb__create_merge_request_comment({
-  merge_request_id: "{pr_number}",
+  merge_request_id: "gh#{pr_number}",
   body: "[{SEVERITY}] {description}\n\n{details_or_suggestion}"
 })
 ```
@@ -125,7 +125,7 @@ mcp__dev-boy_lokb__create_merge_request_comment({
 
 ```
 mcp__dev-boy_lokb__create_merge_request_comment({
-  merge_request_id: "{pr_number}",
+  merge_request_id: "gh#{pr_number}",
   body: "{summary}"
 })
 ```
