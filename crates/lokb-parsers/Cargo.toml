@@ -1,0 +1,9 @@
+[package]
+name = "lokb-parsers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Format-specific parsers (ZIM, PDF, EPUB, Telegram, RDF, ...)"
+
+[dependencies]
+lokb-core = { workspace = true }

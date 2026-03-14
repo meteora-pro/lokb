@@ -1,0 +1,9 @@
+[package]
+name = "lokb-serve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "HTTP server (axum), MCP"
+
+[dependencies]
+lokb-core = { workspace = true }
