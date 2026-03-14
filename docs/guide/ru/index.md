@@ -6,11 +6,11 @@ hero:
   tagline: Персональная offline библиотека знаний на Rust
   actions:
     - theme: brand
-      text: Getting started
-      link: /getting-started/
+      text: Начало работы
+      link: /ru/
     - theme: alt
-      text: GitHub
-      link: https://github.com/meteora-pro/lokb
+      text: English
+      link: /en/
 features:
   - title: "Offline-first"
     details: Всё работает без интернета. Данные не покидают машину.
@@ -25,3 +25,7 @@ features:
     details: 4 уровня приватности. Личные данные не смешиваются с публичными.
     icon: "🛡️"
 ---
+
+:::tip
+Русская версия документации генерируется автоматически из английской. Основная документация — [English](/en/).
+:::

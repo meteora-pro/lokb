@@ -12,9 +12,8 @@ lokb (Local Offline Knowledge Base) — персональная offline биб�
 
 ```bash
 cargo build                    # сборка всего workspace
-cargo build -p lokb-core       # сборка одного crate
 cargo test                     # все тесты
-cargo test -p lokb-core        # тесты одного crate
+cargo test --test e2e -p lokb-cli  # E2E Gherkin-тесты
 cargo test test_name           # один тест
 cargo clippy --workspace       # линтер
 cargo fmt --all                # форматирование
@@ -23,48 +22,64 @@ cargo run -p lokb-cli -- <cmd> # запуск CLI
 
 ## Архитектура
 
-### Четырёхслойное хранение
+Подробная документация: `docs/architecture/adr/` (7 ADR).
+
+### Четырёхслойное хранение (ADR-001)
 
 ```
 RAW SOURCE → OPTIMIZED SOURCE → DERIVED → CACHE
 ```
 
 - **RAW** — исходные файлы (ZIM, PDF, JSON dump). Удаляемые после обработки.
-- **OPTIMIZED** — нормализованный текст в cluster-bundle zstd формате. Source of truth.
-- **DERIVED** — индексы: chunks (LanceDB), FTS (Tantivy), embeddings (LanceDB), entities (LanceDB+SQLite), catalog (SQLite).
+- **OPTIMIZED** — нормализованный текст в cluster-bundle zstd формате. Source of truth. Неприкосновенен.
+- **DERIVED** — индексы: chunks (LanceDB), FTS (Tantivy), embeddings (LanceDB), entities (LanceDB+SQLite), catalog (SQLite). Поддерживает деградацию при нехватке бюджета (ADR-003).
 - **CACHE** — рендеренные документы, LRU eviction.
 
-### Workspace crates (13 штук)
+### Три pipeline (ADR-002)
 
-| Crate | Назначение |
+- **Optimize Pipeline** (RAW → OPTIMIZED): сжать, извлечь суть, унифицировать. Trait: `OptimizeStep`.
+- **Enrichment Pipeline** (OPTIMIZED → DERIVED): расширить, построить индексы, связи. Trait: `EnrichmentStep`.
+- **Cross-source Pipeline** (DERIVED × N → unified): связать данные между источниками. Trait: `CrossSourceStep`.
+
+### Текущая структура (actual)
+
+Сейчас весь код в одном crate `lokb-cli`. Целевая архитектура — 13 crates (см. README.md §13, Phase 0 roadmap [#6](https://github.com/meteora-pro/lokb/issues/6)).
+
+| Crate (actual) | Назначение |
 |---|---|
-| `lokb-core` | Типы, трейты, конфиг, budget manager |
-| `lokb-storage` | Content Store + LanceDB + SQLite |
-| `lokb-pipeline` | Pipeline framework (PipelineStep trait, executor) |
-| `lokb-optimize` | RAW → OPTIMIZED оркестратор |
-| `lokb-ingest` | OPTIMIZED → DERIVED оркестратор |
-| `lokb-parsers` | Парсеры форматов (ZIM, PDF, EPUB, Telegram, RDF, Wikidata, ...) |
-| `lokb-search` | Query engine, hybrid search, RRF, skills |
-| `lokb-embed` | Embedding модели (ONNX/Candle) |
-| `lokb-llm` | LLM бэкенды (Ollama, ONNX, Candle, OpenAI-compatible) |
-| `lokb-graph` | Entity resolution, relations |
-| `lokb-render` | Source Viewer (terminal ratatui + HTML) |
-| `lokb-serve` | HTTP сервер (axum), будущий MCP |
-| `lokb-cli` | CLI (clap) + TUI (ratatui) |
+| `lokb-cli` | CLI (clap) + файловое хранилище + текстовый поиск |
 
-### Ключевые типы данных
+### Ключевые типы данных (ADR-004)
 
+- **DataSource** — источник данных (Public или Personal с privacy levels)
 - **Document** — иерархическая единица (Book→Chapter→Chunk, Conversation→Thread→Chunk)
 - **Chunk** — единица поиска с optional embedding vector
 - **Entity** — узел knowledge graph (Wikidata, NER)
 - **Relation** — ребро графа
-- **DataSource** — источник данных (Public или Personal с privacy levels)
 
-### Pipeline
+### Физическая структура данных
 
-Composable цепочка PipelineStep: extractors → enrichers → transformers → writers. Конфигурируется через TOML. LLM-шаги опциональны с fallback = "skip".
+Всё хранится в `~/.local/share/lokb/` (переопределяется через `LOKB_DATA_DIR`):
 
-## Ключевые зависимости
+- `sources/` — конфиги источников (JSON)
+- `source/` — контент (OPTIMIZED bundles)
+- `derived/` — индексы
+- `cache/` — рендеренные документы
+
+### Реализованные CLI команды
+
+```bash
+lokb source add <name> --raw <path> --format <fmt> --class <cls>
+lokb source list [--format json]
+lokb search <query> [--format json] [--personal-only] [--public-only]
+lokb read <source>:<doc_id> [--section <name>]
+lokb storage status [--format json]
+lokb export <output> [--include-personal]
+```
+
+Поддерживаемые форматы: `markdown-dir`, `telegram-export`.
+
+## Ключевые зависимости (planned)
 
 - **Storage:** lancedb, rusqlite (bundled), tantivy
 - **RDF:** oxrdfio, oxttl, oxrdf (Oxigraph crates)
@@ -73,10 +88,6 @@ Composable цепочка PipelineStep: extractors → enrichers → transformer
 - **Async:** tokio, axum
 - **CLI:** clap (derive), ratatui
 - **Data:** arrow-array, serde, uuid (v7), chrono
-
-## Физическая структура данных
-
-Всё хранится в `~/.local/share/lokb/` с подкаталогами: `raw/`, `source/`, `derived/`, `cache/`, `models/`.
 
 ## Принципы разработки
 
@@ -110,12 +121,13 @@ Step definitions: `crates/lokb-cli/tests/e2e.rs`
 
 ## Документация
 
-Документация на [Rspress](https://rspress.dev/) с автодеплоем на GitHub Pages.
+Документация на [Rspress](https://rspress.dev/) с i18n (English primary, Russian) и автодеплоем на GitHub Pages.
 
 ```bash
 cd docs && pnpm install && pnpm dev   # локальная разработка
 cd docs && pnpm build                  # сборка
 ```
 
-Структура: `docs/guide/` — контент, `docs/rspress.config.ts` — конфиг.
+Структура: `docs/guide/en/` — English (primary), `docs/guide/ru/` — Russian.
 Деплой: `.github/workflows/deploy-docs.yml` при push в main (path: `docs/**`).
+ADR: `docs/architecture/adr/` — Architecture Decision Records (7 штук).

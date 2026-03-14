@@ -1,54 +1,56 @@
 # Quick Start
 
-## Добавить источник
+## Add a source
 
 ```bash
-# Markdown-файлы (статьи, заметки)
+# Markdown files (articles, notes)
 lokb source add my-notes --raw ~/notes/ --format markdown-dir --class personal
 
 # Telegram export
 lokb source add telegram --raw ~/tg_export/ --format telegram-export --class personal
 ```
 
-## Поиск
+Supported formats: `markdown-dir`, `telegram-export`. More formats planned (see [ADR-007](/en/architecture/#architecture-decision-records)).
+
+## Search
 
 ```bash
-# Текстовый поиск
+# Text search
 lokb search "quantum computing"
 
-# JSON формат для pipe
+# JSON output for piping
 lokb search "Eiffel Tower" --format json | jq '.results[0]'
 
-# Фильтр по типу
+# Filter by class
 lokb search "restaurant" --personal-only
 lokb search "quantum" --public-only
 ```
 
-## Чтение документов
+## Read documents
 
 ```bash
 lokb read my-notes:Paris
 lokb read my-notes:Paris --section "Geography"
 ```
 
-## Статус хранилища
+## Storage status
 
 ```bash
 lokb storage status
 lokb storage status --format json
 ```
 
-## Экспорт
+## Export
 
 ```bash
-# Только публичные данные
+# Public data only (default)
 lokb export knowledge.json
 
-# Включая личные
+# Include personal data
 lokb export everything.json --include-personal
 ```
 
-## Список источников
+## List sources
 
 ```bash
 lokb source list

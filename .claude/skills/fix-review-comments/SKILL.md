@@ -31,7 +31,7 @@ gh pr list --head $(git branch --show-current) --json number --jq '.[0].number'
 ### Шаг 1.1: Получить discussions
 
 ```
-mcp__dev-boy_lokb__get_merge_request_discussions({ merge_request_id: "{pr_number}" })
+mcp__dev-boy_lokb__get_merge_request_discussions({ merge_request_id: "gh#{pr_number}" })
 ```
 
 ### Шаг 1.2: Отфильтровать нерешённые
@@ -115,7 +115,7 @@ git push
 
 ```
 mcp__dev-boy_lokb__create_merge_request_comment({
-  merge_request_id: "{pr_number}",
+  merge_request_id: "gh#{pr_number}",
   body: "✅ Fixed in commit {short_sha}"
 })
 ```
@@ -124,7 +124,7 @@ mcp__dev-boy_lokb__create_merge_request_comment({
 
 ```
 mcp__dev-boy_lokb__create_merge_request_comment({
-  merge_request_id: "{pr_number}",
+  merge_request_id: "gh#{pr_number}",
   body: "ℹ️ {reason_why_not_fixed_or_discussion}"
 })
 ```

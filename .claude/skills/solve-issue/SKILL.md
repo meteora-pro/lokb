@@ -27,19 +27,12 @@ activation:
 ### Шаг 1.1: Получить информацию о задаче
 
 ```
-mcp__dev-boy_lokb__get_issue({ issue_id: "{issue_id}" })
+mcp__dev-boy_lokb__get_issue({ issueKey: "gh#{issue_id}" })
 ```
 
 **Если задача не найдена** — сообщить об ошибке и прекратить выполнение.
 
-### Шаг 1.2: Получить связанные задачи и комментарии
-
-```
-mcp__dev-boy_lokb__get_issue_comments({ issue_id: "{issue_id}" })
-mcp__dev-boy_lokb__get_issue_relations({ issue_id: "{issue_id}" })
-```
-
-### Шаг 1.3: Определить тип задачи
+### Шаг 1.2: Определить тип задачи
 
 По labels и title определить тип:
 
@@ -53,7 +46,7 @@ mcp__dev-boy_lokb__get_issue_relations({ issue_id: "{issue_id}" })
 | `dx`, `devops`, `ci` | DevOps/DX | `chore/` |
 | Остальное | Task | `feat/` |
 
-### Шаг 1.4: Показать сводку пользователю
+### Шаг 1.3: Показать сводку пользователю
 
 Вывести краткую сводку и спросить подтверждение:
 
