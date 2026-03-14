@@ -107,8 +107,11 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
         .map_err(|e| io::Error::other(e.to_string()))?;
 
     // Chunk documents and build FTS index
+    // Chunk and index in batch (single Tantivy commit for performance)
     let fts = open_fts()?;
     let chunker = SemanticChunker::default();
+    let mut fts_writer = fts.writer().map_err(|e| io::Error::other(e.to_string()))?;
+
     let files = content_store
         .list_files(name)
         .map_err(|e| io::Error::other(e.to_string()))?;
@@ -141,9 +144,14 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
         let chunks = chunker
             .chunk(&doc, content)
             .map_err(|e| io::Error::other(e.to_string()))?;
-        fts.index_chunks(&chunks, name, &title)
+        fts_writer
+            .add_chunks(&chunks, name, &title)
             .map_err(|e| io::Error::other(e.to_string()))?;
     }
+
+    fts_writer
+        .commit()
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
     Ok(())
 }

@@ -54,7 +54,7 @@ impl TantivyIndex {
         let index = Index::open_or_create(
             tantivy::directory::MmapDirectory::open(path)
                 .map_err(|e| lokb_core::Error::Storage(e.to_string()))?,
-            schema.clone(),
+            schema,
         )
         .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
 
@@ -79,39 +79,24 @@ impl TantivyIndex {
         })
     }
 
-    /// Index a batch of chunks with their source metadata.
-    pub fn index_chunks(&self, chunks: &[Chunk], source_name: &str, title: &str) -> Result<()> {
-        let mut writer: IndexWriter = self
+    /// Create a batch writer for efficient bulk indexing.
+    pub fn writer(&self) -> Result<FtsBatchWriter<'_>> {
+        let writer = self
             .index
-            .writer(50_000_000) // 50MB buffer
+            .writer(100_000_000) // 100MB buffer for bulk
             .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(FtsBatchWriter {
+            writer,
+            index: self,
+            count: 0,
+        })
+    }
 
-        for chunk in chunks {
-            let mut doc = doc!(
-                self.f_chunk_id => chunk.id.to_string(),
-                self.f_doc_id => chunk.document_id.to_string(),
-                self.f_source_id => chunk.source_id.to_string(),
-                self.f_source_name => source_name,
-                self.f_title => title,
-                self.f_text => chunk.text.as_str(),
-                self.f_content_type => format!("{:?}", chunk.content_type),
-                self.f_privacy_level => chunk.privacy_level as u64,
-            );
-            if let Some(section) = &chunk.section_path {
-                doc.add_text(self.f_section, section);
-            }
-            writer
-                .add_document(doc)
-                .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
-        }
-
-        writer
-            .commit()
-            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
-        self.reader
-            .reload()
-            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
-
+    /// Index a batch of chunks (convenience for small batches).
+    pub fn index_chunks(&self, chunks: &[Chunk], source_name: &str, title: &str) -> Result<()> {
+        let mut w = self.writer()?;
+        w.add_chunks(chunks, source_name, title)?;
+        w.commit()?;
         Ok(())
     }
 
@@ -131,7 +116,7 @@ impl TantivyIndex {
             .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
 
         let top_docs = searcher
-            .search(&query, &TopDocs::with_limit(limit * 3)) // fetch more, filter after
+            .search(&query, &TopDocs::with_limit(limit * 3))
             .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
 
         let mut hits = Vec::new();
@@ -145,7 +130,6 @@ impl TantivyIndex {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
 
-            // Filter by privacy/class
             if personal_only && privacy == 0 {
                 continue;
             }
@@ -153,7 +137,6 @@ impl TantivyIndex {
                 continue;
             }
 
-            // Filter by source
             let src_name = get_text(&doc, self.f_source_name);
             if let Some(filter) = source_filter
                 && src_name != filter
@@ -200,6 +183,51 @@ impl TantivyIndex {
             .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
 
         Ok(())
+    }
+}
+
+/// Batch writer for efficient bulk indexing. Commit once after all documents.
+pub struct FtsBatchWriter<'a> {
+    writer: IndexWriter,
+    index: &'a TantivyIndex,
+    count: usize,
+}
+
+impl<'a> FtsBatchWriter<'a> {
+    /// Add chunks to the batch (no commit yet).
+    pub fn add_chunks(&mut self, chunks: &[Chunk], source_name: &str, title: &str) -> Result<()> {
+        for chunk in chunks {
+            let mut doc = doc!(
+                self.index.f_chunk_id => chunk.id.to_string(),
+                self.index.f_doc_id => chunk.document_id.to_string(),
+                self.index.f_source_id => chunk.source_id.to_string(),
+                self.index.f_source_name => source_name,
+                self.index.f_title => title,
+                self.index.f_text => chunk.text.as_str(),
+                self.index.f_content_type => format!("{:?}", chunk.content_type),
+                self.index.f_privacy_level => chunk.privacy_level as u64,
+            );
+            if let Some(section) = &chunk.section_path {
+                doc.add_text(self.index.f_section, section);
+            }
+            self.writer
+                .add_document(doc)
+                .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+            self.count += 1;
+        }
+        Ok(())
+    }
+
+    /// Commit all batched documents and reload reader.
+    pub fn commit(mut self) -> Result<usize> {
+        self.writer
+            .commit()
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        self.index
+            .reader
+            .reload()
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(self.count)
     }
 }
 
