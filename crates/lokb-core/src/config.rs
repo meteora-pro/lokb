@@ -1,12 +1,18 @@
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Root data directory. Overridable via LOKB_DATA_DIR env var.
-pub fn data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("LOKB_DATA_DIR") {
-        PathBuf::from(dir)
-    } else {
-        default_data_dir()
-    }
+/// Cached after first call via OnceLock.
+pub fn data_dir() -> &'static PathBuf {
+    DATA_DIR.get_or_init(|| {
+        if let Ok(dir) = std::env::var("LOKB_DATA_DIR") {
+            PathBuf::from(dir)
+        } else {
+            default_data_dir()
+        }
+    })
 }
 
 fn default_data_dir() -> PathBuf {

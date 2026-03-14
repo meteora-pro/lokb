@@ -158,7 +158,7 @@ impl ContentHash {
     }
 
     pub fn hex(&self) -> String {
-        hex::encode(self.0)
+        blake3::Hash::from_bytes(self.0).to_hex().to_string()
     }
 }
 
@@ -239,11 +239,4 @@ pub enum StorageLayer {
     Source,
     Derived,
     Cache,
-}
-
-// hex encoding for ContentHash
-mod hex {
-    pub fn encode(bytes: [u8; 32]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
 }
