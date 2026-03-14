@@ -1095,7 +1095,7 @@ indicatif = "0.17"
 
 ## 15. Roadmap
 
-### Phase 0 — Skeleton (1 неделя)
+### [Phase 0 — Skeleton (1 неделя)](https://github.com/meteora-pro/lokb/issues/6)
 - [ ] Cargo workspace, 13 crates
 - [ ] Core types: DataSource, Document, Chunk, Entity, Relation
 - [ ] DataSourceClass: Public / Personal
@@ -1103,7 +1103,7 @@ indicatif = "0.17"
 - [ ] Filesystem layout init (raw/source/derived/cache)
 - [ ] Trait definitions: PipelineStep, SourceOptimizer, Chunker, Searcher
 
-### Phase 1 — Pipeline + Read + FTS (5 недель)
+### [Phase 1 — Pipeline + Read + FTS (5 недель)](https://github.com/meteora-pro/lokb/issues/7)
 - [ ] **Pipeline framework** (step trait, executor, TOML config)
 - [ ] **Steps:** MarkdownPassthrough, PlainTextExtractor, HtmlToMarkdown
 - [ ] **Steps:** TextCleaner, LanguageDetector
@@ -1120,7 +1120,7 @@ indicatif = "0.17"
 - [ ] HumanAnnotation step (batch from file)
 - [ ] ✅ Человек может: добавить markdown/txt, искать, читать
 
-### Phase 2 — Wikipedia + Embeddings (5 недель)
+### [Phase 2 — Wikipedia + Embeddings (5 недель)](https://github.com/meteora-pro/lokb/issues/8)
 - [ ] **ZimOptimizer** (Wikipedia ZIM → clean markdown)
 - [ ] **WikiXmlOptimizer** (fallback)
 - [ ] **PdfOptimizer, EpubOptimizer**
@@ -1133,7 +1133,7 @@ indicatif = "0.17"
 - [ ] Skills: `research`, `fact-check`
 - [ ] `lokb export/import` (portable KB, public only by default)
 
-### Phase 3 — Knowledge Graph (3 недели)
+### [Phase 3 — Knowledge Graph (3 недели)](https://github.com/meteora-pro/lokb/issues/9)
 - [ ] **WikidataOptimizer** (JSON → filtered Entity/Relation)
 - [ ] **RdfOptimizer** (oxttl → Entity/Relation)
 - [ ] Entity/Relation tables (LanceDB + SQLite)
@@ -1143,7 +1143,7 @@ indicatif = "0.17"
 - [ ] Fact Lookup (structured → text fallback)
 - [ ] Semantic graph edges (txtai-style: embedding proximity)
 
-### Phase 4 — Personal Data + Takeout (4 недели)
+### [Phase 4 — Personal Data + Takeout (4 недели)](https://github.com/meteora-pro/lokb/issues/10)
 - [ ] **TakeoutDispatcher** (Google, Apple, Meta)
 - [ ] **TelegramOptimizer** (segmentation + normalization)
 - [ ] **EmailOptimizer** (MBOX → threads)
@@ -1157,7 +1157,7 @@ indicatif = "0.17"
 - [ ] Spatio-temporal entity linking (photos ↔ GPS ↔ chats)
 - [ ] Skills: `personal`, `nearby`
 
-### Phase 5 — LLM Integration (3 недели)
+### [Phase 5 — LLM Integration (3 недели)](https://github.com/meteora-pro/lokb/issues/11)
 - [ ] **LLM backend abstraction** (Ollama, ONNX, Candle, OpenAI-compatible)
 - [ ] **ImageDescriber** step (vision LLM)
 - [ ] **SpeechToText** step (Whisper)
@@ -1168,7 +1168,7 @@ indicatif = "0.17"
 - [ ] Citation generation в LLM ответах
 - [ ] `verify_claim` skill
 
-### Phase 6 — Polish (2 недели)
+### [Phase 6 — Polish (2 недели)](https://github.com/meteora-pro/lokb/issues/12)
 - [ ] Incremental sync (delta updates)
 - [ ] arXiv, Stack Overflow optimizers
 - [ ] Compaction, storage optimization

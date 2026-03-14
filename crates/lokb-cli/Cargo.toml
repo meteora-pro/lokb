@@ -1,0 +1,26 @@
+[package]
+name = "lokb-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lokb"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+cucumber = "0.22"
+futures = "0.3"
+serde_json = { workspace = true }
+shell-words = "1"
+tempfile = "3"
+
+[[test]]
+name = "e2e"
+harness = false
+path = "tests/e2e.rs"
