@@ -30,4 +30,3 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
-      - run: cargo test --test e2e -p lokb-cli

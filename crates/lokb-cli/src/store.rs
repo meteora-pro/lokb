@@ -109,7 +109,9 @@ fn ingest_markdown_dir(raw_path: &Path, dest: &Path) -> io::Result<u64> {
         let entry = entry?;
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "md") {
-            let file_name = path.file_name().unwrap();
+            let Some(file_name) = path.file_name() else {
+                continue;
+            };
             fs::copy(&path, dest.join(file_name))?;
             count += 1;
         }
@@ -171,24 +173,19 @@ fn ingest_telegram(raw_path: &Path, dest: &Path) -> io::Result<u64> {
 }
 
 fn time_gap_hours(a: &str, b: &str) -> f64 {
-    // Simple comparison: parse "2024-03-15T14:20:00" format
+    // Parse "2024-03-15T14:20:00" format into approximate total hours.
+    // Month and year are included to handle cross-month/year boundaries.
     let parse = |s: &str| -> Option<f64> {
-        let parts: Vec<&str> = s.split('T').collect();
-        if parts.len() != 2 {
-            return None;
-        }
-        let time_parts: Vec<&str> = parts[1].split(':').collect();
-        if time_parts.len() < 2 {
-            return None;
-        }
-        let date_parts: Vec<&str> = parts[0].split('-').collect();
-        if date_parts.len() < 3 {
-            return None;
-        }
-        let day: f64 = date_parts[2].parse().ok()?;
-        let hours: f64 = time_parts[0].parse().ok()?;
-        let minutes: f64 = time_parts[1].parse().ok()?;
-        Some(day * 24.0 + hours + minutes / 60.0)
+        let (date_part, time_part) = s.split_once('T')?;
+        let mut date_parts = date_part.split('-');
+        let year: f64 = date_parts.next()?.parse().ok()?;
+        let month: f64 = date_parts.next()?.parse().ok()?;
+        let day: f64 = date_parts.next()?.parse().ok()?;
+        let mut time_parts = time_part.split(':');
+        let hours: f64 = time_parts.next()?.parse().ok()?;
+        let minutes: f64 = time_parts.next()?.parse().ok()?;
+        // Approximate: 365 days/year, 30 days/month
+        Some(year * 365.0 * 24.0 + month * 30.0 * 24.0 + day * 24.0 + hours + minutes / 60.0)
     };
 
     match (parse(a), parse(b)) {
@@ -335,12 +332,19 @@ fn extract_title(content: &str, path: &Path) -> String {
 }
 
 fn extract_snippet(content: &str, pos: usize, max_len: usize) -> String {
-    let start = pos.saturating_sub(max_len / 2);
-    let end = (pos + max_len / 2).min(content.len());
+    let raw_start = pos.saturating_sub(max_len / 2);
+    let raw_end = (pos + max_len / 2).min(content.len());
 
-    let snippet = &content[start..end];
-    // Trim to word boundaries
-    let snippet = snippet.trim();
+    // Snap to valid UTF-8 char boundaries so slicing never panics on non-ASCII text.
+    let start = (0..=raw_start)
+        .rev()
+        .find(|&i| content.is_char_boundary(i))
+        .unwrap_or(0);
+    let end = (raw_end..=content.len())
+        .find(|&i| content.is_char_boundary(i))
+        .unwrap_or(content.len());
+
+    let snippet = content[start..end].trim();
     if start > 0 {
         format!("...{snippet}...")
     } else if end < content.len() {
