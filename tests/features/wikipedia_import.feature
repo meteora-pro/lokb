@@ -26,3 +26,18 @@ Feature: Wikipedia import and search
     Then the command succeeds
     And the output contains "capital and largest city of France"
     And the output contains "## Geography"
+
+  Scenario: Incremental update skips unchanged documents
+    Given a clean lokb data directory
+    And source "wikipedia-test" is loaded from "wikipedia/" as "markdown-dir" class "public"
+    When I run lokb "source update wikipedia-test --raw {fixtures}/wikipedia/"
+    Then the command succeeds
+    And the output contains "Unchanged: 5"
+    And the output contains "New:       0"
+
+  Scenario: Duplicate source add is rejected
+    Given a clean lokb data directory
+    And source "wikipedia-test" is loaded from "wikipedia/" as "markdown-dir" class "public"
+    When I run lokb "source add wikipedia-test --raw {fixtures}/wikipedia/ --format markdown-dir --class public"
+    Then the command fails
+    And the output contains "already exists"
