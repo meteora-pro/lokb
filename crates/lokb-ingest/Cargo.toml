@@ -7,3 +7,6 @@ description = "OPTIMIZED → DERIVED orchestrator"
 
 [dependencies]
 lokb-core = { workspace = true }
+lokb-pipeline = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

@@ -137,6 +137,17 @@ fn command_succeeds(world: &mut LokbWorld) {
     );
 }
 
+#[then("the command fails")]
+fn command_fails(world: &mut LokbWorld) {
+    let output = world.last_output.as_ref().expect("no command was run");
+    assert!(
+        !output.status.success(),
+        "expected command to fail, but it succeeded\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 #[then(expr = "the output contains {string}")]
 fn output_contains(world: &mut LokbWorld, expected: String) {
     let combined = world.combined_output();

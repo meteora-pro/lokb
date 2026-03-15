@@ -1,66 +1,73 @@
+use chrono::Utc;
+use lokb_core::config;
+use lokb_core::{
+    ContentHash, ContentType, DataSource, DataSourceClass, PrivacyLevel, RawRetention, SyncStrategy,
+};
+use lokb_ingest::SemanticChunker;
+use lokb_pipeline::Chunker;
+use lokb_search::TantivyIndex;
+use lokb_storage::{FileContentStore, SqliteCatalog};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
-/// Root data directory. Overridable via LOKB_DATA_DIR env var.
-pub fn data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("LOKB_DATA_DIR") {
-        PathBuf::from(dir)
-    } else {
-        dirs().default
+fn catalog_path() -> PathBuf {
+    config::derived_dir().join("catalog.sqlite")
+}
+
+fn fts_path() -> PathBuf {
+    config::derived_dir().join("fts")
+}
+
+fn open_catalog() -> io::Result<SqliteCatalog> {
+    let path = catalog_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
+    SqliteCatalog::open(&path).map_err(|e| io::Error::other(e.to_string()))
 }
 
-struct Dirs {
-    default: PathBuf,
+fn open_content_store() -> FileContentStore {
+    FileContentStore::new(config::source_content_dir().as_ref())
 }
 
-fn dirs() -> Dirs {
-    let base = std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."));
-    Dirs {
-        default: base.join(".local/share/lokb"),
-    }
+fn open_fts() -> io::Result<TantivyIndex> {
+    TantivyIndex::open(&fts_path()).map_err(|e| io::Error::other(e.to_string()))
 }
 
-fn sources_dir() -> PathBuf {
-    data_dir().join("sources")
+/// Metrics collected during source ingestion (ADR-002, ADR-003).
+#[derive(Debug, Serialize)]
+pub struct IngestMetrics {
+    /// Total raw input size in bytes
+    pub raw_input_bytes: u64,
+    /// Total optimized output size in bytes
+    pub optimized_bytes: u64,
+    /// Compression ratio (raw / optimized)
+    pub compression_ratio: f64,
+    /// Number of documents processed
+    pub documents_processed: u64,
+    /// Number of chunks created
+    pub chunks_created: u64,
+    /// FTS index size after ingestion in bytes
+    pub fts_index_bytes: u64,
+    /// Total storage overhead from enrichment (FTS + catalog)
+    pub enrichment_overhead_bytes: u64,
+    /// Wall-clock time for optimize phase (ms)
+    pub optimize_time_ms: u64,
+    /// Wall-clock time for enrichment phase (ms)
+    pub enrichment_time_ms: u64,
+    /// Total wall-clock time (ms)
+    pub total_time_ms: u64,
 }
 
-fn source_dir() -> PathBuf {
-    data_dir().join("source")
-}
+/// Save source config and ingest raw data. Returns metrics.
+pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Result<IngestMetrics> {
+    use std::time::Instant;
+    let total_start = Instant::now();
 
-fn derived_dir() -> PathBuf {
-    data_dir().join("derived")
-}
-
-fn cache_dir() -> PathBuf {
-    data_dir().join("cache")
-}
-
-/// Ensure the base directory structure exists.
-pub fn init_dirs() -> io::Result<()> {
-    for dir in [sources_dir(), source_dir(), derived_dir(), cache_dir()] {
-        fs::create_dir_all(dir)?;
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SourceConfig {
-    pub name: String,
-    pub raw_path: String,
-    pub format: String,
-    pub class: String,
-    pub document_count: u64,
-}
-
-/// Save source config and ingest raw data.
-pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Result<()> {
-    init_dirs()?;
+    config::init_dirs()?;
 
     let raw_path = PathBuf::from(raw);
     if !raw_path.exists() {
@@ -70,31 +77,365 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
         ));
     }
 
-    let dest = source_dir().join(name);
-    fs::create_dir_all(&dest)?;
+    let raw_input_bytes = dir_size(&raw_path);
 
-    let doc_count = ingest_raw(&raw_path, format, &dest)?;
+    let catalog = open_catalog()?;
+    let content_store = open_content_store();
 
-    let config = SourceConfig {
-        name: name.to_string(),
-        raw_path: raw.to_string(),
-        format: format.to_string(),
-        class: class.to_string(),
-        document_count: doc_count,
+    // Check if source already exists (ADR-006: reject, suggest update)
+    let existing = catalog
+        .get_source(name)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    if existing.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("source '{}' already exists", name),
+        ));
+    }
+
+    let source_id = Uuid::now_v7();
+    let ds_class = match class {
+        "public" => DataSourceClass::Public {
+            license: None,
+            web_url_template: None,
+        },
+        "personal" => DataSourceClass::Personal {
+            owner: None,
+            platform: None,
+            contains_pii: true,
+        },
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("unknown class: {class}. Use 'public' or 'personal'"),
+            ));
+        }
     };
 
-    let config_path = sources_dir().join(format!("{}.json", name));
-    let json = serde_json::to_string_pretty(&config).map_err(io::Error::other)?;
-    fs::write(config_path, json)?;
+    // Register source first (documents reference it via FK)
+    let source = DataSource {
+        id: source_id,
+        name: name.to_string(),
+        class: ds_class,
+        format: format.to_string(),
+        sync_strategy: SyncStrategy::default(),
+        raw_retention: RawRetention::default(),
+        priority: if class == "personal" { 250 } else { 100 },
+        document_count: 0,
+        created_at: Utc::now(),
+    };
+    catalog
+        .add_source(&source)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Phase 1: Optimize — ingest raw files into content store
+    let optimize_start = Instant::now();
+    let doc_count = ingest_raw(&raw_path, format, name, &content_store, source_id, &catalog)?;
+    let optimize_time = optimize_start.elapsed();
+
+    // Update document count
+    catalog
+        .update_source_doc_count(source_id, doc_count)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let optimized_bytes = content_store.source_size(name);
+
+    // Phase 2: Enrichment — chunk and build FTS index (single commit)
+    let enrichment_start = std::time::Instant::now();
+    let fts = open_fts()?;
+    let chunker = SemanticChunker::default();
+    let mut fts_writer = fts.writer().map_err(|e| io::Error::other(e.to_string()))?;
+
+    let files = content_store
+        .list_files(name)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    for (filename, content) in &files {
+        let title = extract_doc_title(content, filename);
+        let doc = lokb_core::Document {
+            id: Uuid::now_v7(),
+            source_id,
+            external_id: filename.clone(),
+            parent_id: None,
+            depth: 0,
+            title: title.clone(),
+            content_type: if format == "telegram-export" {
+                ContentType::Conversation
+            } else {
+                ContentType::Article
+            },
+            language: None,
+            content_hash: ContentHash::from_bytes(content.as_bytes()),
+            content_size: content.len() as u64,
+            created_at: Utc::now(),
+            indexed_at: Utc::now(),
+            privacy_level: if class == "personal" {
+                PrivacyLevel::Private
+            } else {
+                PrivacyLevel::Public
+            },
+        };
+        let chunks = chunker
+            .chunk(&doc, content)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        fts_writer
+            .add_chunks(&chunks, name, &title)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+    }
+
+    let chunks_created = fts_writer
+        .commit()
+        .map_err(|e| io::Error::other(e.to_string()))? as u64;
+    let enrichment_time = enrichment_start.elapsed();
+
+    let fts_index_bytes = dir_size(&fts_path());
+    let total_time = total_start.elapsed();
+
+    Ok(IngestMetrics {
+        raw_input_bytes,
+        optimized_bytes,
+        compression_ratio: if optimized_bytes > 0 {
+            raw_input_bytes as f64 / optimized_bytes as f64
+        } else {
+            0.0
+        },
+        documents_processed: doc_count,
+        chunks_created,
+        fts_index_bytes,
+        enrichment_overhead_bytes: fts_index_bytes + dir_size(&catalog_path()),
+        optimize_time_ms: optimize_time.as_millis() as u64,
+        enrichment_time_ms: enrichment_time.as_millis() as u64,
+        total_time_ms: total_time.as_millis() as u64,
+    })
+}
+
+/// Report from incremental update (ADR-006).
+pub struct UpdateReport {
+    pub new_count: u64,
+    pub changed_count: u64,
+    pub unchanged_count: u64,
+    pub deleted_count: u64,
+}
+
+/// Incremental update of an existing source (ADR-006).
+/// Compares content hashes, only processes new/changed documents.
+pub fn update_source(name: &str, raw: &str) -> io::Result<UpdateReport> {
+    config::init_dirs()?;
+
+    let raw_path = PathBuf::from(raw);
+    if !raw_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("raw path not found: {}", raw),
+        ));
+    }
+
+    let catalog = open_catalog()?;
+    let content_store = open_content_store();
+    let fts = open_fts()?;
+
+    let source = catalog
+        .get_source(name)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("source '{}' not found. Use 'source add' first.", name),
+            )
+        })?;
+
+    // Collect new raw files with their content hashes
+    let new_files = scan_raw_files(&raw_path, &source.format)?;
+
+    // Get existing external_ids from catalog
+    let existing_ids: std::collections::HashSet<String> = catalog
+        .list_external_ids(source.id)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .into_iter()
+        .collect();
+
+    let chunker = SemanticChunker::default();
+    let ctx = IngestContext {
+        source_name: name,
+        source: &source,
+        content_store: &content_store,
+        catalog: &catalog,
+        fts: &fts,
+        chunker: &chunker,
+    };
+
+    let mut new_count = 0u64;
+    let mut changed_count = 0u64;
+    let mut unchanged_count = 0u64;
+
+    let seen_ids: std::collections::HashSet<String> =
+        new_files.iter().map(|f| f.external_id.clone()).collect();
+
+    for file_info in &new_files {
+        let existing_hash = catalog
+            .get_content_hash(source.id, &file_info.external_id)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let new_hash = ContentHash::from_bytes(file_info.content.as_bytes());
+
+        match existing_hash {
+            None => {
+                // New document
+                ingest_single_file(
+                    &file_info.external_id,
+                    &file_info.filename,
+                    &file_info.content,
+                    &ctx,
+                )?;
+                new_count += 1;
+            }
+            Some(old_hash) if old_hash != new_hash.0.as_slice() => {
+                // Changed document — re-ingest
+                ingest_single_file(
+                    &file_info.external_id,
+                    &file_info.filename,
+                    &file_info.content,
+                    &ctx,
+                )?;
+                changed_count += 1;
+            }
+            _ => {
+                unchanged_count += 1;
+            }
+        }
+    }
+
+    // Detect deleted documents
+    let deleted_count = existing_ids.difference(&seen_ids).count() as u64;
+    for deleted_id in existing_ids.difference(&seen_ids) {
+        catalog
+            .delete_by_external_id(source.id, deleted_id)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+    }
+
+    // Update document count
+    let total = catalog
+        .document_count(source.id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    catalog
+        .update_source_doc_count(source.id, total)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    Ok(UpdateReport {
+        new_count,
+        changed_count,
+        unchanged_count,
+        deleted_count,
+    })
+}
+
+struct RawFileInfo {
+    external_id: String,
+    filename: String,
+    content: String,
+}
+
+/// Scan raw files and return their external_ids + content.
+fn scan_raw_files(raw_path: &Path, format: &str) -> io::Result<Vec<RawFileInfo>> {
+    match format {
+        "markdown-dir" => {
+            let mut files = vec![];
+            for entry in fs::read_dir(raw_path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "md") {
+                    let filename = path.file_name().unwrap().to_string_lossy().to_string();
+                    let external_id = filename.trim_end_matches(".md").to_string();
+                    let content = fs::read_to_string(&path)?;
+                    files.push(RawFileInfo {
+                        external_id,
+                        filename,
+                        content,
+                    });
+                }
+            }
+            Ok(files)
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("incremental update not supported for format: {format}"),
+        )),
+    }
+}
+
+struct IngestContext<'a> {
+    source_name: &'a str,
+    source: &'a DataSource,
+    content_store: &'a FileContentStore,
+    catalog: &'a SqliteCatalog,
+    fts: &'a TantivyIndex,
+    chunker: &'a SemanticChunker,
+}
+
+/// Ingest a single file: write to content store, register in catalog, chunk, index.
+fn ingest_single_file(
+    external_id: &str,
+    filename: &str,
+    content: &str,
+    ctx: &IngestContext<'_>,
+) -> io::Result<()> {
+    let title = extract_doc_title(content, filename);
+
+    ctx.content_store
+        .write_file(ctx.source_name, filename, content)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let doc = lokb_core::Document {
+        id: Uuid::now_v7(),
+        source_id: ctx.source.id,
+        external_id: external_id.to_string(),
+        parent_id: None,
+        depth: 0,
+        title: title.clone(),
+        content_type: ContentType::Article,
+        language: Some("en".to_string()),
+        content_hash: ContentHash::from_bytes(content.as_bytes()),
+        content_size: content.len() as u64,
+        created_at: Utc::now(),
+        indexed_at: Utc::now(),
+        privacy_level: if ctx.source.class.is_personal() {
+            PrivacyLevel::Private
+        } else {
+            PrivacyLevel::Public
+        },
+    };
+
+    ctx.catalog
+        .upsert_document(&doc)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let chunks = ctx
+        .chunker
+        .chunk(&doc, content)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    ctx.fts
+        .index_chunks(&chunks, ctx.source_name, &title)
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
     Ok(())
 }
 
-/// Ingest raw files into source directory. Returns document count.
-fn ingest_raw(raw_path: &Path, format: &str, dest: &Path) -> io::Result<u64> {
+/// Ingest raw files. Returns document count.
+fn ingest_raw(
+    raw_path: &Path,
+    format: &str,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
     match format {
-        "markdown-dir" => ingest_markdown_dir(raw_path, dest),
-        "telegram-export" => ingest_telegram(raw_path, dest),
+        "markdown-dir" => {
+            ingest_markdown_dir(raw_path, source_name, content_store, source_id, catalog)
+        }
+        "telegram-export" => {
+            ingest_telegram(raw_path, source_name, content_store, source_id, catalog)
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -102,15 +443,49 @@ fn ingest_raw(raw_path: &Path, format: &str, dest: &Path) -> io::Result<u64> {
     }
 }
 
-/// Copy markdown files into source directory.
-fn ingest_markdown_dir(raw_path: &Path, dest: &Path) -> io::Result<u64> {
+/// Copy markdown files and register documents in catalog.
+fn ingest_markdown_dir(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
     let mut count = 0;
     for entry in fs::read_dir(raw_path)? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "md") {
-            let file_name = path.file_name().unwrap();
-            fs::copy(&path, dest.join(file_name))?;
+            let file_name = path.file_name().unwrap().to_string_lossy().to_string();
+            let content = fs::read_to_string(&path)?;
+            let external_id = file_name.trim_end_matches(".md").to_string();
+            let title = extract_doc_title(&content, &file_name);
+
+            // Copy file to content store
+            content_store
+                .copy_file(source_name, &path, &file_name)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+
+            // Register document in catalog (ADR-006: dedup by source_id + external_id)
+            let doc = lokb_core::Document {
+                id: Uuid::now_v7(),
+                source_id,
+                external_id,
+                parent_id: None,
+                depth: 0,
+                title,
+                content_type: ContentType::Article,
+                language: Some("en".to_string()),
+                content_hash: ContentHash::from_bytes(content.as_bytes()),
+                content_size: content.len() as u64,
+                created_at: Utc::now(),
+                indexed_at: Utc::now(),
+                privacy_level: PrivacyLevel::Public,
+            };
+            catalog
+                .upsert_document(&doc)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+
             count += 1;
         }
     }
@@ -118,7 +493,13 @@ fn ingest_markdown_dir(raw_path: &Path, dest: &Path) -> io::Result<u64> {
 }
 
 /// Parse Telegram export JSON and store messages as text documents.
-fn ingest_telegram(raw_path: &Path, dest: &Path) -> io::Result<u64> {
+fn ingest_telegram(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
     let json_path = raw_path.join("result.json");
     if !json_path.exists() {
         return Err(io::Error::new(
@@ -127,8 +508,8 @@ fn ingest_telegram(raw_path: &Path, dest: &Path) -> io::Result<u64> {
         ));
     }
 
-    let content = fs::read_to_string(&json_path)?;
-    let export: TelegramExport = serde_json::from_str(&content)
+    let raw_content = fs::read_to_string(&json_path)?;
+    let export: TelegramExport = serde_json::from_str(&raw_content)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     let chat_name = &export.name;
@@ -139,7 +520,6 @@ fn ingest_telegram(raw_path: &Path, dest: &Path) -> io::Result<u64> {
         if msg.r#type != "message" {
             continue;
         }
-        // Segment by 2-hour gaps
         if let Some(last) = current_segment.last()
             && time_gap_hours(&last.date, &msg.date) > 2.0
             && !current_segment.is_empty()
@@ -163,7 +543,31 @@ fn ingest_telegram(raw_path: &Path, dest: &Path) -> io::Result<u64> {
             text.push_str(&format!("{} [{}]: {}\n", from, time, msg_text));
         }
         let filename = format!("segment_{:04}.txt", i);
-        fs::write(dest.join(&filename), &text)?;
+        let external_id = format!("segment_{:04}", i);
+
+        content_store
+            .write_file(source_name, &filename, &text)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let doc = lokb_core::Document {
+            id: Uuid::now_v7(),
+            source_id,
+            external_id,
+            parent_id: None,
+            depth: 0,
+            title: format!("{} segment {}", chat_name, i),
+            content_type: ContentType::Conversation,
+            language: None,
+            content_hash: ContentHash::from_bytes(text.as_bytes()),
+            content_size: text.len() as u64,
+            created_at: Utc::now(),
+            indexed_at: Utc::now(),
+            privacy_level: PrivacyLevel::Private,
+        };
+        catalog
+            .upsert_document(&doc)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
         count += 1;
     }
 
@@ -171,7 +575,6 @@ fn ingest_telegram(raw_path: &Path, dest: &Path) -> io::Result<u64> {
 }
 
 fn time_gap_hours(a: &str, b: &str) -> f64 {
-    // Simple comparison: parse "2024-03-15T14:20:00" format
     let parse = |s: &str| -> Option<f64> {
         let parts: Vec<&str> = s.split('T').collect();
         if parts.len() != 2 {
@@ -197,7 +600,6 @@ fn time_gap_hours(a: &str, b: &str) -> f64 {
     }
 }
 
-/// Extract text from Telegram message text field (can be string or array).
 fn extract_text(text: &serde_json::Value) -> String {
     match text {
         serde_json::Value::String(s) => s.clone(),
@@ -232,28 +634,37 @@ struct TelegramMessage {
     text: serde_json::Value,
 }
 
-/// List all configured sources.
-pub fn list_sources() -> io::Result<Vec<SourceConfig>> {
-    let dir = sources_dir();
-    if !dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut sources = vec![];
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "json") {
-            let content = fs::read_to_string(&path)?;
-            if let Ok(config) = serde_json::from_str::<SourceConfig>(&content) {
-                sources.push(config);
-            }
-        }
-    }
-    sources.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(sources)
+/// List all configured sources (from SQLite catalog).
+pub fn list_sources() -> io::Result<Vec<SourceListItem>> {
+    let catalog = open_catalog()?;
+    let sources = catalog
+        .list_sources()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(sources
+        .into_iter()
+        .map(|s| SourceListItem {
+            name: s.name,
+            format: s.format,
+            class: if s.class.is_public() {
+                "public".to_string()
+            } else {
+                "personal".to_string()
+            },
+            document_count: s.document_count,
+        })
+        .collect())
 }
 
-/// Search result from store.
+/// Source info for JSON output (backward compatible with E2E tests).
+#[derive(Debug, Serialize)]
+pub struct SourceListItem {
+    pub name: String,
+    pub format: String,
+    pub class: String,
+    pub document_count: u64,
+}
+
+/// Search result (backward compatible with E2E tests).
 #[derive(Debug, Serialize)]
 pub struct SearchResult {
     pub title: String,
@@ -262,84 +673,48 @@ pub struct SearchResult {
     pub score: f64,
 }
 
-/// Simple text search across all documents.
+/// Full-text search via Tantivy BM25.
 pub fn search(
     query: &str,
     personal_only: bool,
     public_only: bool,
 ) -> io::Result<Vec<SearchResult>> {
-    let sources = list_sources()?;
-    let query_lower = query.to_lowercase();
-    let mut results = vec![];
+    let fts = open_fts()?;
+    let hits = fts
+        .search(query, 20, None, personal_only, public_only)
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
-    for source in &sources {
-        if personal_only && source.class != "personal" {
-            continue;
-        }
-        if public_only && source.class != "public" {
-            continue;
-        }
-
-        let src_dir = source_dir().join(&source.name);
-        if !src_dir.exists() {
-            continue;
-        }
-
-        for entry in fs::read_dir(&src_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
+    Ok(hits
+        .into_iter()
+        .map(|hit| {
+            let snippet = extract_snippet(&hit.text, 0, 200);
+            SearchResult {
+                title: hit.title,
+                source: hit.source_name,
+                snippet,
+                score: hit.score as f64,
             }
-
-            let content = fs::read_to_string(&path).unwrap_or_default();
-            let content_lower = content.to_lowercase();
-
-            if let Some(pos) = content_lower.find(&query_lower) {
-                let title = extract_title(&content, &path);
-                let snippet = extract_snippet(&content, pos, 200);
-
-                // Simple scoring: count occurrences
-                let score = content_lower.matches(&query_lower).count() as f64;
-
-                results.push(SearchResult {
-                    title,
-                    source: source.name.clone(),
-                    snippet,
-                    score,
-                });
-            }
-        }
-    }
-
-    results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    Ok(results)
+        })
+        .collect())
 }
 
-fn extract_title(content: &str, path: &Path) -> String {
-    // Try to get first markdown heading
+fn extract_doc_title(content: &str, filename: &str) -> String {
     for line in content.lines() {
         let trimmed = line.trim();
         if let Some(heading) = trimmed.strip_prefix("# ") {
             return heading.to_string();
         }
     }
-    // Fallback to filename
-    path.file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Untitled".to_string())
+    filename
+        .trim_end_matches(".md")
+        .trim_end_matches(".txt")
+        .to_string()
 }
 
 fn extract_snippet(content: &str, pos: usize, max_len: usize) -> String {
     let start = pos.saturating_sub(max_len / 2);
     let end = (pos + max_len / 2).min(content.len());
-
     let snippet = &content[start..end];
-    // Trim to word boundaries
     let snippet = snippet.trim();
     if start > 0 {
         format!("...{snippet}...")
@@ -360,51 +735,44 @@ pub fn read_document(doc_ref: &str) -> io::Result<String> {
         ));
     }
     let (source_name, doc_id) = (parts[0], parts[1]);
-    let src_dir = source_dir().join(source_name);
+    let content_store = open_content_store();
 
-    // Try exact filename match with common extensions
-    for ext in ["md", "txt", ""] {
-        let filename = if ext.is_empty() {
-            doc_id.to_string()
-        } else {
-            format!("{}.{}", doc_id, ext)
-        };
-        let path = src_dir.join(&filename);
-        if path.exists() {
-            return fs::read_to_string(path);
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::NotFound,
-        format!(
-            "document '{}' not found in source '{}'",
-            doc_id, source_name
-        ),
-    ))
+    content_store
+        .read_by_filename(source_name, doc_id)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "document '{}' not found in source '{}'",
+                    doc_id, source_name
+                ),
+            )
+        })
 }
 
 /// Storage layer stats.
 #[derive(Debug, Serialize)]
-pub struct StorageLayer {
+pub struct StorageLayerInfo {
     pub name: String,
     pub size_bytes: u64,
 }
 
 /// Calculate storage status.
-pub fn storage_status() -> io::Result<Vec<StorageLayer>> {
+pub fn storage_status() -> io::Result<Vec<StorageLayerInfo>> {
+    let content_store = open_content_store();
     Ok(vec![
-        StorageLayer {
+        StorageLayerInfo {
             name: "source".to_string(),
-            size_bytes: dir_size(&source_dir()),
+            size_bytes: content_store.total_size(),
         },
-        StorageLayer {
+        StorageLayerInfo {
             name: "derived".to_string(),
-            size_bytes: dir_size(&derived_dir()),
+            size_bytes: dir_size(config::derived_dir().as_ref()),
         },
-        StorageLayer {
+        StorageLayerInfo {
             name: "cache".to_string(),
-            size_bytes: dir_size(&cache_dir()),
+            size_bytes: dir_size(config::cache_dir().as_ref()),
         },
     ])
 }
@@ -430,21 +798,20 @@ fn dir_size(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Export public sources to a tar.zst file.
+/// Export public sources.
 pub fn export(output: &str, include_personal: bool) -> io::Result<()> {
-    let sources = list_sources()?;
+    let catalog = open_catalog()?;
+    let sources = catalog
+        .list_sources()
+        .map_err(|e| io::Error::other(e.to_string()))?;
     let output_path = PathBuf::from(output);
 
-    // Collect files to export
-    let mut exported_sources: Vec<String> = vec![];
-    for source in &sources {
-        if !include_personal && source.class == "personal" {
-            continue;
-        }
-        exported_sources.push(source.name.clone());
-    }
+    let exported_sources: Vec<String> = sources
+        .iter()
+        .filter(|s| include_personal || s.class.is_exportable())
+        .map(|s| s.name.clone())
+        .collect();
 
-    // Create a simple manifest as the export (tar.zst would need extra deps)
     let manifest = serde_json::json!({
         "version": "0.1.0",
         "sources": exported_sources,

@@ -10,7 +10,13 @@ path = "src/main.rs"
 
 [dependencies]
 lokb-core = { workspace = true }
+lokb-storage = { workspace = true }
+lokb-ingest = { path = "../lokb-ingest" }
+lokb-search = { path = "../lokb-search" }
+lokb-pipeline = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+chrono = { workspace = true }
+uuid = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

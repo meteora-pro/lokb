@@ -7,3 +7,6 @@ description = "Query engine, hybrid search, RRF"
 
 [dependencies]
 lokb-core = { workspace = true }
+tantivy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
