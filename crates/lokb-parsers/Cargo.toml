@@ -7,3 +7,7 @@ description = "Format-specific parsers (ZIM, PDF, EPUB, Telegram, RDF, ...)"
 
 [dependencies]
 lokb-core = { workspace = true }
+lokb-pipeline = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

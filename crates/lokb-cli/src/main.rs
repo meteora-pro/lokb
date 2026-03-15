@@ -77,6 +77,14 @@ enum SourceCommands {
         #[arg(long)]
         raw: String,
     },
+    /// Show detailed source status
+    Status {
+        /// Source name
+        name: String,
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
     /// List all sources
     List {
         /// Output format
@@ -147,6 +155,19 @@ fn run_source(command: SourceCommands) -> Result<(), Box<dyn std::error::Error>>
                 metrics.fts_index_bytes
             );
             println!("  Total: {:.1}s", metrics.total_time_ms as f64 / 1000.0);
+        }
+        SourceCommands::Status { name, format } => {
+            let status = store::source_status(&name)?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            } else {
+                println!("Source: {}", status.name);
+                println!("  Format:     {}", status.format);
+                println!("  Class:      {}", status.class);
+                println!("  Documents:  {}", status.document_count);
+                println!("  Content:    {} bytes", status.content_bytes);
+                println!("  Created:    {}", status.created_at);
+            }
         }
         SourceCommands::Update { name, raw } => {
             let report = store::update_source(&name, &raw)?;

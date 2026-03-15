@@ -1,1 +1,3 @@
-// Placeholder — implementation coming in later phases.
+pub mod markdown;
+
+pub use markdown::MarkdownPassthrough;

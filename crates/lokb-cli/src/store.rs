@@ -634,6 +634,45 @@ struct TelegramMessage {
     text: serde_json::Value,
 }
 
+/// Detailed status of a single source.
+#[derive(Debug, Serialize)]
+pub struct SourceStatus {
+    pub name: String,
+    pub format: String,
+    pub class: String,
+    pub document_count: u64,
+    pub content_bytes: u64,
+    pub created_at: String,
+}
+
+pub fn source_status(name: &str) -> io::Result<SourceStatus> {
+    let catalog = open_catalog()?;
+    let content_store = open_content_store();
+
+    let source = catalog
+        .get_source(name)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("source '{name}' not found"),
+            )
+        })?;
+
+    Ok(SourceStatus {
+        name: source.name.clone(),
+        format: source.format.clone(),
+        class: if source.class.is_public() {
+            "public".to_string()
+        } else {
+            "personal".to_string()
+        },
+        document_count: source.document_count,
+        content_bytes: content_store.source_size(&source.name),
+        created_at: source.created_at.to_rfc3339(),
+    })
+}
+
 /// List all configured sources (from SQLite catalog).
 pub fn list_sources() -> io::Result<Vec<SourceListItem>> {
     let catalog = open_catalog()?;
