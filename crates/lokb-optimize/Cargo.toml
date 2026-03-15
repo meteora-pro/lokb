@@ -7,3 +7,5 @@ description = "RAW → OPTIMIZED orchestrator"
 
 [dependencies]
 lokb-core = { workspace = true }
+lokb-pipeline = { workspace = true }
+async-trait = { workspace = true }

@@ -99,6 +99,15 @@ impl FileContentStore {
         Ok(files)
     }
 
+    /// Delete all content for a source.
+    pub fn delete_source(&self, source_name: &str) -> Result<()> {
+        let dir = self.source_dir(source_name);
+        if dir.exists() {
+            fs::remove_dir_all(dir)?;
+        }
+        Ok(())
+    }
+
     /// Calculate total size of a source directory.
     pub fn source_size(&self, source_name: &str) -> u64 {
         dir_size(&self.source_dir(source_name))

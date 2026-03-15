@@ -634,6 +634,78 @@ struct TelegramMessage {
     text: serde_json::Value,
 }
 
+/// Detailed status of a single source.
+#[derive(Debug, Serialize)]
+pub struct SourceStatus {
+    pub name: String,
+    pub format: String,
+    pub class: String,
+    pub document_count: u64,
+    pub content_bytes: u64,
+    pub created_at: String,
+}
+
+pub fn source_status(name: &str) -> io::Result<SourceStatus> {
+    let catalog = open_catalog()?;
+    let content_store = open_content_store();
+
+    let source = catalog
+        .get_source(name)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("source '{name}' not found"),
+            )
+        })?;
+
+    Ok(SourceStatus {
+        name: source.name.clone(),
+        format: source.format.clone(),
+        class: if source.class.is_public() {
+            "public".to_string()
+        } else {
+            "personal".to_string()
+        },
+        document_count: source.document_count,
+        content_bytes: content_store.source_size(&source.name),
+        created_at: source.created_at.to_rfc3339(),
+    })
+}
+
+/// Delete a source: catalog entries, content files, FTS index entries.
+pub fn delete_source(name: &str) -> io::Result<()> {
+    let catalog = open_catalog()?;
+    let content_store = open_content_store();
+
+    let source = catalog
+        .get_source(name)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("source '{name}' not found"),
+            )
+        })?;
+
+    // Delete FTS entries for this source
+    let fts = open_fts()?;
+    fts.delete_source(&source.id.to_string())
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Delete content files
+    content_store
+        .delete_source(name)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Delete from catalog (documents + source)
+    catalog
+        .delete_source(source.id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    Ok(())
+}
+
 /// List all configured sources (from SQLite catalog).
 pub fn list_sources() -> io::Result<Vec<SourceListItem>> {
     let catalog = open_catalog()?;
@@ -758,10 +830,29 @@ pub struct StorageLayerInfo {
     pub size_bytes: u64,
 }
 
-/// Calculate storage status.
-pub fn storage_status() -> io::Result<Vec<StorageLayerInfo>> {
+/// Per-source storage breakdown.
+#[derive(Debug, Serialize)]
+pub struct SourceStorageInfo {
+    pub name: String,
+    pub class: String,
+    pub documents: u64,
+    pub content_bytes: u64,
+}
+
+/// Full storage status with per-source breakdown (ADR-003).
+#[derive(Debug, Serialize)]
+pub struct FullStorageStatus {
+    pub layers: Vec<StorageLayerInfo>,
+    pub total_bytes: u64,
+    pub sources: Vec<SourceStorageInfo>,
+}
+
+/// Calculate storage status with per-source breakdown.
+pub fn storage_status() -> io::Result<FullStorageStatus> {
+    let catalog = open_catalog()?;
     let content_store = open_content_store();
-    Ok(vec![
+
+    let layers = vec![
         StorageLayerInfo {
             name: "source".to_string(),
             size_bytes: content_store.total_size(),
@@ -774,7 +865,31 @@ pub fn storage_status() -> io::Result<Vec<StorageLayerInfo>> {
             name: "cache".to_string(),
             size_bytes: dir_size(config::cache_dir().as_ref()),
         },
-    ])
+    ];
+    let total_bytes: u64 = layers.iter().map(|l| l.size_bytes).sum();
+
+    let sources_list = catalog
+        .list_sources()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let sources = sources_list
+        .iter()
+        .map(|s| SourceStorageInfo {
+            name: s.name.clone(),
+            class: if s.class.is_public() {
+                "public".to_string()
+            } else {
+                "personal".to_string()
+            },
+            documents: s.document_count,
+            content_bytes: content_store.source_size(&s.name),
+        })
+        .collect();
+
+    Ok(FullStorageStatus {
+        layers,
+        total_bytes,
+        sources,
+    })
 }
 
 fn dir_size(path: &Path) -> u64 {

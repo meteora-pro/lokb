@@ -1032,14 +1032,20 @@ dependencies = [
 name = "lokb-optimize"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "lokb-core",
+ "lokb-pipeline",
 ]
 
 [[package]]
 name = "lokb-parsers"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "lokb-core",
+ "lokb-pipeline",
+ "uuid",
 ]
 
 [[package]]

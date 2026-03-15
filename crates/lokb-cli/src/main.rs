@@ -68,6 +68,9 @@ enum SourceCommands {
         /// Data class (public/personal)
         #[arg(long)]
         class: String,
+        /// Output format (text or json for machine-readable metrics)
+        #[arg(long, default_value = "text")]
+        output: String,
     },
     /// Update an existing source with new data
     Update {
@@ -76,6 +79,19 @@ enum SourceCommands {
         /// Path to raw data
         #[arg(long)]
         raw: String,
+    },
+    /// Show detailed source status
+    Status {
+        /// Source name
+        name: String,
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Delete a source and all its data
+    Delete {
+        /// Source name
+        name: String,
     },
     /// List all sources
     List {
@@ -127,26 +143,48 @@ fn run_source(command: SourceCommands) -> Result<(), Box<dyn std::error::Error>>
             raw,
             format,
             class,
+            output,
         } => {
             let metrics = store::add_source(&name, &raw, &format, &class)?;
-            println!("Source '{}' added successfully", name);
-            println!(
-                "  Documents: {}  Chunks: {}",
-                metrics.documents_processed, metrics.chunks_created
-            );
-            println!(
-                "  Optimize:  {:.1}s ({} → {} bytes, {:.1}x compression)",
-                metrics.optimize_time_ms as f64 / 1000.0,
-                metrics.raw_input_bytes,
-                metrics.optimized_bytes,
-                metrics.compression_ratio
-            );
-            println!(
-                "  Enrichment: {:.1}s (FTS index: {} bytes)",
-                metrics.enrichment_time_ms as f64 / 1000.0,
-                metrics.fts_index_bytes
-            );
-            println!("  Total: {:.1}s", metrics.total_time_ms as f64 / 1000.0);
+            if output == "json" {
+                println!("{}", serde_json::to_string_pretty(&metrics)?);
+            } else {
+                println!("Source '{}' added successfully", name);
+                println!(
+                    "  Documents: {}  Chunks: {}",
+                    metrics.documents_processed, metrics.chunks_created
+                );
+                println!(
+                    "  Optimize:  {:.1}s ({} → {} bytes, {:.1}x compression)",
+                    metrics.optimize_time_ms as f64 / 1000.0,
+                    metrics.raw_input_bytes,
+                    metrics.optimized_bytes,
+                    metrics.compression_ratio
+                );
+                println!(
+                    "  Enrichment: {:.1}s (FTS index: {} bytes)",
+                    metrics.enrichment_time_ms as f64 / 1000.0,
+                    metrics.fts_index_bytes
+                );
+                println!("  Total: {:.1}s", metrics.total_time_ms as f64 / 1000.0);
+            }
+        }
+        SourceCommands::Status { name, format } => {
+            let status = store::source_status(&name)?;
+            if format == "json" {
+                println!("{}", serde_json::to_string_pretty(&status)?);
+            } else {
+                println!("Source: {}", status.name);
+                println!("  Format:     {}", status.format);
+                println!("  Class:      {}", status.class);
+                println!("  Documents:  {}", status.document_count);
+                println!("  Content:    {} bytes", status.content_bytes);
+                println!("  Created:    {}", status.created_at);
+            }
+        }
+        SourceCommands::Delete { name } => {
+            store::delete_source(&name)?;
+            println!("Source '{}' deleted", name);
         }
         SourceCommands::Update { name, raw } => {
             let report = store::update_source(&name, &raw)?;
@@ -236,22 +274,43 @@ fn run_read(doc_ref: &str, section: Option<&str>) -> Result<(), Box<dyn std::err
 fn run_storage(command: StorageCommands) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         StorageCommands::Status { format } => {
-            let layers = store::storage_status()?;
+            let status = store::storage_status()?;
             if format == "json" {
-                let total: u64 = layers.iter().map(|l| l.size_bytes).sum();
-                let output = serde_json::json!({
-                    "layers": layers,
-                    "total_bytes": total,
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
+                println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
-                for l in &layers {
-                    println!("{:<10} {} bytes", l.name, l.size_bytes);
+                println!("LAYERS");
+                for l in &status.layers {
+                    println!("  {:<10} {}", l.name, format_bytes(l.size_bytes));
+                }
+                println!("  {:<10} {}", "total", format_bytes(status.total_bytes));
+                if !status.sources.is_empty() {
+                    println!("\nSOURCES");
+                    for s in &status.sources {
+                        println!(
+                            "  {:<20} {:<10} {:>6} docs  {}",
+                            s.name,
+                            s.class,
+                            s.documents,
+                            format_bytes(s.content_bytes)
+                        );
+                    }
                 }
             }
         }
     }
     Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
 }
 
 fn run_export(output: &str, include_personal: bool) -> Result<(), Box<dyn std::error::Error>> {
