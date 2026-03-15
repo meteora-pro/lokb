@@ -11,3 +11,4 @@ lokb-pipeline = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+htmd = { workspace = true }
