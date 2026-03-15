@@ -490,6 +490,7 @@ fn ingest_raw(
             catalog,
         ),
         "epub" => ingest_epub(raw_path, source_name, content_store, source_id, catalog),
+        "pdf-dir" => ingest_pdf_dir(raw_path, source_name, content_store, source_id, catalog),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -567,6 +568,44 @@ fn ingest_text_dir(
 
 /// Parse Telegram export JSON and store messages as text documents.
 /// Extract chapters from EPUB and register in catalog.
+/// Extract text from PDF files in a directory.
+fn ingest_pdf_dir(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
+    let mut count = 0;
+    for entry in fs::read_dir(raw_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "pdf") {
+            continue;
+        }
+
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let external_id = filename.trim_end_matches(".pdf").to_string();
+
+        match lokb_parsers::extract_pdf(&path, source_id, &external_id) {
+            Ok((doc, text)) => {
+                let md_filename = format!("{external_id}.md");
+                content_store
+                    .write_file(source_name, &md_filename, &text)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                catalog
+                    .upsert_document(&doc)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                count += 1;
+            }
+            Err(e) => {
+                eprintln!("Warning: skipping {filename}: {e}");
+            }
+        }
+    }
+    Ok(count)
+}
+
 fn ingest_epub(
     raw_path: &Path,
     source_name: &str,
