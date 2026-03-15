@@ -23,6 +23,15 @@ enum Commands {
         /// Output format
         #[arg(long, default_value = "text")]
         format: String,
+        /// Search mode: quick (top 5), normal (top 20), deep (top 50)
+        #[arg(long, default_value = "normal")]
+        mode: String,
+        /// Max results
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Filter by source name
+        #[arg(long)]
+        source: Option<String>,
         /// Search only personal sources
         #[arg(long)]
         personal_only: bool,
@@ -119,9 +128,20 @@ fn main() {
         Commands::Search {
             query,
             format,
+            mode,
+            limit,
+            source,
             personal_only,
             public_only,
-        } => run_search(&query, &format, personal_only, public_only),
+        } => run_search(
+            &query,
+            &format,
+            &mode,
+            limit,
+            source.as_deref(),
+            personal_only,
+            public_only,
+        ),
         Commands::Read { doc_ref, section } => run_read(&doc_ref, section.as_deref()),
         Commands::Storage { command } => run_storage(command),
         Commands::Export {
@@ -217,13 +237,23 @@ fn run_source(command: SourceCommands) -> Result<(), Box<dyn std::error::Error>>
 fn run_search(
     query: &str,
     format: &str,
+    mode: &str,
+    limit: Option<usize>,
+    source: Option<&str>,
     personal_only: bool,
     public_only: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let results = store::search(query, personal_only, public_only)?;
+    let max_results = limit.unwrap_or(match mode {
+        "quick" => 5,
+        "deep" => 50,
+        _ => 20, // normal
+    });
+    let results = store::search(query, max_results, source, personal_only, public_only)?;
+
     if format == "json" {
         let output = serde_json::json!({
             "query": query,
+            "mode": mode,
             "results": results,
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -231,7 +261,7 @@ fn run_search(
         println!("No results found.");
     } else {
         for r in &results {
-            println!("--- {} [{}] ---", r.title, r.source);
+            println!("--- {} [{}] (score: {:.2}) ---", r.title, r.source, r.score);
             println!("{}\n", r.snippet);
         }
     }

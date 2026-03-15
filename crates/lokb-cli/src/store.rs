@@ -748,12 +748,14 @@ pub struct SearchResult {
 /// Full-text search via Tantivy BM25.
 pub fn search(
     query: &str,
+    limit: usize,
+    source_filter: Option<&str>,
     personal_only: bool,
     public_only: bool,
 ) -> io::Result<Vec<SearchResult>> {
     let fts = open_fts()?;
     let hits = fts
-        .search(query, 20, None, personal_only, public_only)
+        .search(query, limit, source_filter, personal_only, public_only)
         .map_err(|e| io::Error::other(e.to_string()))?;
 
     Ok(hits
