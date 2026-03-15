@@ -7,3 +7,11 @@ description = "HTTP server (axum), MCP"
 
 [dependencies]
 lokb-core = { workspace = true }
+lokb-storage = { workspace = true }
+lokb-search = { path = "../lokb-search" }
+lokb-ingest = { path = "../lokb-ingest" }
+lokb-pipeline = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

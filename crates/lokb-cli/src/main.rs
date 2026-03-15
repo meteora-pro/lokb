@@ -88,6 +88,12 @@ enum Commands {
         #[arg(long, default_value = "text")]
         format: String,
     },
+    /// Start HTTP API server
+    Serve {
+        /// Port number
+        #[arg(long, default_value = "7890")]
+        port: u16,
+    },
     /// Export knowledge base
     Export {
         /// Output file path
@@ -193,6 +199,7 @@ fn main() {
             documents,
             format,
         } => run_entity(&name, relations, documents, &format),
+        Commands::Serve { port } => run_serve(port),
         Commands::Export {
             output,
             include_personal,
@@ -395,6 +402,12 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
+}
+
+fn run_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(lokb_serve::serve(port))?;
+    Ok(())
 }
 
 fn run_enrich(
