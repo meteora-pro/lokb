@@ -2170,10 +2170,14 @@ dependencies = [
  "htmd",
  "lokb-core",
  "lokb-pipeline",
+ "memmap2",
  "pdf-extract",
  "quick-xml",
+ "tempfile",
  "uuid",
+ "xz2",
  "zip",
+ "zstd",
 ]
 
 [[package]]

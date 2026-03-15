@@ -15,3 +15,9 @@ htmd = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
 pdf-extract = { workspace = true }
+memmap2 = { workspace = true }
+xz2 = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

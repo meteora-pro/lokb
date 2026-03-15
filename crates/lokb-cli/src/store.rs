@@ -588,6 +588,7 @@ fn ingest_raw(
         ),
         "epub" => ingest_epub(raw_path, source_name, content_store, source_id, catalog),
         "pdf-dir" => ingest_pdf_dir(raw_path, source_name, content_store, source_id, catalog),
+        "zim" => ingest_zim(raw_path, source_name, content_store, source_id, catalog),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -701,6 +702,79 @@ fn ingest_pdf_dir(
         }
     }
     Ok(count)
+}
+
+/// Extract articles from ZIM file (Wikipedia offline dump).
+fn ingest_zim(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
+    let reader =
+        lokb_parsers::ZimReader::open(raw_path).map_err(|e| io::Error::other(e.to_string()))?;
+
+    eprintln!(
+        "ZIM: {} entries, {} clusters",
+        reader.entry_count(),
+        reader.cluster_count()
+    );
+
+    let articles = reader.articles();
+    eprintln!("ZIM: {} HTML articles found", articles.len());
+
+    let mut count = 0u64;
+    for article in &articles {
+        // Convert HTML → Markdown
+        let markdown = lokb_parsers::html::html_to_markdown(&article.content);
+        if markdown.trim().is_empty() {
+            continue;
+        }
+
+        let external_id = article.path.clone();
+        let title = if article.title.is_empty() {
+            article.path.clone()
+        } else {
+            article.title.clone()
+        };
+        let filename = format!("{}.md", sanitize_filename(&external_id));
+
+        content_store
+            .write_file(source_name, &filename, &markdown)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let doc = lokb_core::Document {
+            id: Uuid::now_v7(),
+            source_id,
+            external_id,
+            parent_id: None,
+            depth: 0,
+            title,
+            content_type: ContentType::Article,
+            language: Some("en".to_string()),
+            content_hash: ContentHash::from_bytes(markdown.as_bytes()),
+            content_size: markdown.len() as u64,
+            created_at: Utc::now(),
+            indexed_at: Utc::now(),
+            privacy_level: PrivacyLevel::Public,
+        };
+        catalog
+            .upsert_document(&doc)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        count += 1;
+        if count.is_multiple_of(10000) {
+            eprintln!("ZIM: {count} articles processed...");
+        }
+    }
+
+    Ok(count)
+}
+
+/// Sanitize filename for content store (replace path separators).
+fn sanitize_filename(name: &str) -> String {
+    name.replace(['/', '\\', ':'], "_")
 }
 
 fn ingest_epub(
