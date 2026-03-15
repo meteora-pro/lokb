@@ -356,6 +356,32 @@ fn scan_raw_files(raw_path: &Path, format: &str) -> io::Result<Vec<RawFileInfo>>
             }
             Ok(files)
         }
+        "html-dir" => {
+            let mut files = vec![];
+            for entry in fs::read_dir(raw_path)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path
+                    .extension()
+                    .is_some_and(|ext| ext == "html" || ext == "htm")
+                {
+                    let filename = path.file_name().unwrap().to_string_lossy().to_string();
+                    let external_id = filename
+                        .trim_end_matches(".html")
+                        .trim_end_matches(".htm")
+                        .to_string();
+                    let html = fs::read_to_string(&path)?;
+                    let content = lokb_parsers::html::html_to_markdown(&html);
+                    // Store as .md in content store
+                    files.push(RawFileInfo {
+                        external_id,
+                        filename: filename.replace(".html", ".md").replace(".htm", ".md"),
+                        content,
+                    });
+                }
+            }
+            Ok(files)
+        }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("incremental update not supported for format: {format}"),
@@ -436,6 +462,7 @@ fn ingest_raw(
         "telegram-export" => {
             ingest_telegram(raw_path, source_name, content_store, source_id, catalog)
         }
+        "html-dir" => ingest_html_dir(raw_path, source_name, content_store, source_id, catalog),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -467,6 +494,61 @@ fn ingest_markdown_dir(
                 .map_err(|e| io::Error::other(e.to_string()))?;
 
             // Register document in catalog (ADR-006: dedup by source_id + external_id)
+            let doc = lokb_core::Document {
+                id: Uuid::now_v7(),
+                source_id,
+                external_id,
+                parent_id: None,
+                depth: 0,
+                title,
+                content_type: ContentType::Article,
+                language: Some("en".to_string()),
+                content_hash: ContentHash::from_bytes(content.as_bytes()),
+                content_size: content.len() as u64,
+                created_at: Utc::now(),
+                indexed_at: Utc::now(),
+                privacy_level: PrivacyLevel::Public,
+            };
+            catalog
+                .upsert_document(&doc)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Convert HTML files to markdown and register in catalog.
+fn ingest_html_dir(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
+    let mut count = 0;
+    for entry in fs::read_dir(raw_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path
+            .extension()
+            .is_some_and(|ext| ext == "html" || ext == "htm")
+        {
+            let html = fs::read_to_string(&path)?;
+            let content = lokb_parsers::html::html_to_markdown(&html);
+            let filename = path.file_name().unwrap().to_string_lossy().to_string();
+            let external_id = filename
+                .trim_end_matches(".html")
+                .trim_end_matches(".htm")
+                .to_string();
+            let md_filename = format!("{external_id}.md");
+            let title = extract_doc_title(&content, &md_filename);
+
+            content_store
+                .write_file(source_name, &md_filename, &content)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+
             let doc = lokb_core::Document {
                 id: Uuid::now_v7(),
                 source_id,

@@ -1015,6 +1015,7 @@ dependencies = [
  "futures",
  "lokb-core",
  "lokb-ingest",
+ "lokb-parsers",
  "lokb-pipeline",
  "lokb-search",
  "lokb-storage",
