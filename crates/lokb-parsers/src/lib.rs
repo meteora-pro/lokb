@@ -1,6 +1,7 @@
 pub mod epub;
 pub mod html;
 pub mod markdown;
+pub mod mbox;
 pub mod pdf;
 pub mod wikidata;
 pub mod wikilinks;

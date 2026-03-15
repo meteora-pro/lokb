@@ -1,0 +1,44 @@
+From alice@example.com Mon Mar 15 10:00:00 2024
+From: Alice Smith <alice@example.com>
+To: bob@example.com
+Subject: Project proposal
+Date: Mon, 15 Mar 2024 10:00:00 +0000
+Message-ID: <msg001@example.com>
+
+Hi Bob,
+
+I'd like to discuss the new project proposal. Can we schedule a meeting?
+
+Best,
+Alice
+
+From bob@example.com Mon Mar 15 11:00:00 2024
+From: Bob Jones <bob@example.com>
+To: alice@example.com
+Subject: Re: Project proposal
+Date: Mon, 15 Mar 2024 11:00:00 +0000
+Message-ID: <msg002@example.com>
+In-Reply-To: <msg001@example.com>
+
+Hi Alice,
+
+Sure, how about tomorrow at 2pm? I'll prepare some notes about the budget.
+
+Thanks,
+Bob
+
+From charlie@example.com Mon Mar 15 14:00:00 2024
+From: Charlie Wilson <charlie@example.com>
+To: team@example.com
+Subject: Weekly standup notes
+Date: Mon, 15 Mar 2024 14:00:00 +0000
+Message-ID: <msg003@example.com>
+
+Team,
+
+Here are the notes from today's standup:
+- Frontend: completed login page
+- Backend: API endpoints ready for testing
+- DevOps: CI pipeline configured
+
+Charlie

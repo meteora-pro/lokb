@@ -597,6 +597,7 @@ fn ingest_raw(
         "pdf-dir" => ingest_pdf_dir(raw_path, source_name, content_store, source_id, catalog),
         "zim" => ingest_zim(raw_path, source_name, content_store, source_id, catalog),
         "wikidata-json" => ingest_wikidata(raw_path, source_id, catalog),
+        "mbox" => ingest_mbox(raw_path, source_name, content_store, source_id, catalog),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -783,6 +784,56 @@ fn ingest_zim(
 /// Sanitize filename for content store (replace path separators).
 fn sanitize_filename(name: &str) -> String {
     name.replace(['/', '\\', ':'], "_")
+}
+
+/// Parse MBOX email archive with threading.
+fn ingest_mbox(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
+    let threads = lokb_parsers::mbox::parse_mbox(raw_path, source_id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Extract contacts as Person entities
+    let contacts = lokb_parsers::mbox::extract_contacts(&threads);
+    for contact in &contacts {
+        let entity_id = format!(
+            "person:{}",
+            contact
+                .to_lowercase()
+                .replace(' ', "_")
+                .replace(['<', '>', '@'], "_")
+        );
+        let _ = catalog.upsert_entity(
+            &entity_id,
+            contact,
+            None,
+            &["Person".to_string()],
+            &std::collections::HashMap::new(),
+        );
+    }
+    if !contacts.is_empty() {
+        eprintln!("  Contacts: {} people extracted from email", contacts.len());
+    }
+
+    let mut count = 0;
+    for (doc, text) in &threads {
+        if text.is_empty() {
+            continue;
+        }
+        let filename = format!("{}.md", doc.external_id);
+        content_store
+            .write_file(source_name, &filename, text)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        catalog
+            .upsert_document(doc)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 fn ingest_epub(
