@@ -5,7 +5,7 @@ use lokb_core::{
 };
 use lokb_ingest::SemanticChunker;
 use lokb_pipeline::Chunker;
-use lokb_search::TantivyIndex;
+use lokb_search::{TantivyIndex, VectorIndex};
 use lokb_storage::{FileContentStore, SqliteCatalog};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -35,6 +35,14 @@ fn open_content_store() -> FileContentStore {
 
 fn open_fts() -> io::Result<TantivyIndex> {
     TantivyIndex::open(&fts_path()).map_err(|e| io::Error::other(e.to_string()))
+}
+
+fn vector_path() -> PathBuf {
+    config::derived_dir().join("vectors.json")
+}
+
+fn open_vectors() -> io::Result<VectorIndex> {
+    VectorIndex::open(&vector_path()).map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// Metrics collected during source ingestion (ADR-002, ADR-003).
@@ -188,8 +196,28 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
         .map_err(|e| io::Error::other(e.to_string()))? as u64;
     let enrichment_time = enrichment_start.elapsed();
 
+    // Phase 3: Optional embedding (background in future, inline for now)
+    let embed_start = std::time::Instant::now();
+    let vectors_created = match embed_chunks(name, &files, format, class, &chunker) {
+        Ok(count) => count,
+        Err(e) => {
+            eprintln!("Warning: embedding skipped: {e}");
+            0
+        }
+    };
+    let embed_time = embed_start.elapsed();
+
     let fts_index_bytes = dir_size(&fts_path());
     let total_time = total_start.elapsed();
+
+    if vectors_created > 0 {
+        eprintln!(
+            "  Embedding: {:.1}s ({} vectors, {} dims)",
+            embed_time.as_secs_f64(),
+            vectors_created,
+            384
+        );
+    }
 
     Ok(IngestMetrics {
         raw_input_bytes,
@@ -207,6 +235,75 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
         enrichment_time_ms: enrichment_time.as_millis() as u64,
         total_time_ms: total_time.as_millis() as u64,
     })
+}
+
+/// Embed chunks and store in vector index. Returns number of vectors created.
+fn embed_chunks(
+    source_name: &str,
+    files: &[(String, String)],
+    format: &str,
+    class: &str,
+    chunker: &SemanticChunker,
+) -> io::Result<u64> {
+    let mut embedder = lokb_embed::Embedder::new().map_err(|e| io::Error::other(e.to_string()))?;
+    let mut vector_index = open_vectors()?;
+
+    let privacy_level: u8 = if class == "personal" { 2 } else { 0 };
+    let mut entries = Vec::new();
+
+    for (filename, content) in files {
+        let title = extract_doc_title(content, filename);
+        let doc = lokb_core::Document {
+            id: Uuid::now_v7(),
+            source_id: Uuid::nil(), // dummy, only need for chunking
+            external_id: filename.clone(),
+            parent_id: None,
+            depth: 0,
+            title: title.clone(),
+            content_type: if format == "telegram-export" {
+                ContentType::Conversation
+            } else {
+                ContentType::Article
+            },
+            language: None,
+            content_hash: ContentHash::from_bytes(content.as_bytes()),
+            content_size: content.len() as u64,
+            created_at: Utc::now(),
+            indexed_at: Utc::now(),
+            privacy_level: PrivacyLevel::default(),
+        };
+
+        let chunks = chunker
+            .chunk(&doc, content)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // Batch embed chunk texts
+        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+        if texts.is_empty() {
+            continue;
+        }
+
+        let vectors = embedder
+            .embed(&texts)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        for (chunk, vector) in chunks.iter().zip(vectors.into_iter()) {
+            entries.push(lokb_search::vector::VectorEntry {
+                chunk_id: chunk.id.to_string(),
+                source_name: source_name.to_string(),
+                title: title.clone(),
+                text: chunk.text.clone(),
+                vector,
+                privacy_level,
+            });
+        }
+    }
+
+    let count = entries.len() as u64;
+    vector_index
+        .add_entries(entries)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(count)
 }
 
 /// Report from incremental update (ADR-006).
@@ -889,7 +986,7 @@ pub struct SearchResult {
     pub score: f64,
 }
 
-/// Full-text search via Tantivy BM25.
+/// Hybrid search: FTS (BM25) + optional vector similarity with RRF fusion.
 pub fn search(
     query: &str,
     limit: usize,
@@ -897,23 +994,108 @@ pub fn search(
     personal_only: bool,
     public_only: bool,
 ) -> io::Result<Vec<SearchResult>> {
+    // FTS search
     let fts = open_fts()?;
-    let hits = fts
-        .search(query, limit, source_filter, personal_only, public_only)
+    let fts_hits = fts
+        .search(query, limit * 2, source_filter, personal_only, public_only)
         .map_err(|e| io::Error::other(e.to_string()))?;
 
-    Ok(hits
-        .into_iter()
-        .map(|hit| {
-            let snippet = extract_snippet(&hit.text, 0, 200);
-            SearchResult {
-                title: hit.title,
-                source: hit.source_name,
-                snippet,
-                score: hit.score as f64,
-            }
+    // Try vector search (optional — may not have embeddings)
+    let vector_index = open_vectors()?;
+    let vector_hits = if !vector_index.is_empty() {
+        match lokb_embed::Embedder::new() {
+            Ok(mut embedder) => match embedder.embed_one(query) {
+                Ok(query_vec) => vector_index.search(
+                    &query_vec,
+                    limit * 2,
+                    source_filter,
+                    personal_only,
+                    public_only,
+                ),
+                Err(_) => vec![],
+            },
+            Err(_) => vec![],
+        }
+    } else {
+        vec![]
+    };
+
+    // If no vectors, return FTS only
+    if vector_hits.is_empty() {
+        return Ok(fts_hits
+            .into_iter()
+            .take(limit)
+            .map(|hit| {
+                let snippet = extract_snippet(&hit.text, 0, 200);
+                SearchResult {
+                    title: hit.title,
+                    source: hit.source_name,
+                    snippet,
+                    score: hit.score as f64,
+                }
+            })
+            .collect());
+    }
+
+    // Hybrid: Reciprocal Rank Fusion (RRF)
+    // score(doc) = Σ 1 / (k + rank_i(doc))  where k=60
+    let k = 60.0;
+    let mut rrf_scores: std::collections::HashMap<String, (f64, SearchResult)> =
+        std::collections::HashMap::new();
+
+    for (rank, hit) in fts_hits.iter().enumerate() {
+        let key = format!("{}:{}", hit.source_name, hit.title);
+        let rrf = 1.0 / (k + rank as f64);
+        rrf_scores
+            .entry(key)
+            .and_modify(|(score, _)| *score += rrf)
+            .or_insert_with(|| {
+                (
+                    rrf,
+                    SearchResult {
+                        title: hit.title.clone(),
+                        source: hit.source_name.clone(),
+                        snippet: extract_snippet(&hit.text, 0, 200),
+                        score: 0.0,
+                    },
+                )
+            });
+    }
+
+    for (rank, hit) in vector_hits.iter().enumerate() {
+        let key = format!("{}:{}", hit.source_name, hit.title);
+        let rrf = 1.0 / (k + rank as f64);
+        rrf_scores
+            .entry(key)
+            .and_modify(|(score, _)| *score += rrf)
+            .or_insert_with(|| {
+                (
+                    rrf,
+                    SearchResult {
+                        title: hit.title.clone(),
+                        source: hit.source_name.clone(),
+                        snippet: extract_snippet(&hit.text, 0, 200),
+                        score: 0.0,
+                    },
+                )
+            });
+    }
+
+    let mut results: Vec<SearchResult> = rrf_scores
+        .into_values()
+        .map(|(score, mut r)| {
+            r.score = score;
+            r
         })
-        .collect())
+        .collect();
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    results.truncate(limit);
+
+    Ok(results)
 }
 
 fn extract_doc_title(content: &str, filename: &str) -> String {

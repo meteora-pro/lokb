@@ -15,6 +15,7 @@ lokb-ingest = { path = "../lokb-ingest" }
 lokb-search = { path = "../lokb-search" }
 lokb-pipeline = { workspace = true }
 lokb-parsers = { path = "../lokb-parsers" }
+lokb-embed = { path = "../lokb-embed" }
 clap = { version = "4", features = ["derive"] }
 chrono = { workspace = true }
 uuid = { workspace = true }
