@@ -7,3 +7,6 @@ description = "LLM backends (Ollama, ONNX, OpenAI-compatible)"
 
 [dependencies]
 lokb-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }

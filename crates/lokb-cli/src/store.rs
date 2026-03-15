@@ -1607,6 +1607,98 @@ fn extract_entities_from_files(
     total
 }
 
+/// Run LLM enrichment on existing source documents.
+pub fn enrich_source(
+    source_name: &str,
+    step: &str,
+    llm_spec: &str,
+    limit: usize,
+) -> io::Result<u64> {
+    let catalog = open_catalog()?;
+    let content_store = open_content_store();
+    let fts = open_fts()?;
+    let chunker = SemanticChunker::default();
+
+    let source = catalog
+        .get_source(source_name)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("source '{source_name}' not found"),
+            )
+        })?;
+
+    let backend =
+        lokb_llm::create_backend(llm_spec).map_err(|e| io::Error::other(e.to_string()))?;
+
+    let files = content_store
+        .list_files(source_name)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let max = if limit > 0 { limit } else { files.len() };
+    let mut count = 0u64;
+
+    for (filename, content) in files.iter().take(max) {
+        match step {
+            "summarize" => {
+                let prompt = format!(
+                    "Summarize the following text in 2-3 sentences:\n\n{}",
+                    &content[..content.len().min(2000)]
+                );
+                match backend.generate(&prompt, &lokb_llm::LlmOptions::default()) {
+                    Ok(summary) if !summary.is_empty() => {
+                        // Append summary to document and re-index
+                        let enriched = format!("{content}\n\n## Summary\n\n{summary}");
+                        content_store
+                            .write_file(source_name, filename, &enriched)
+                            .map_err(|e| io::Error::other(e.to_string()))?;
+
+                        let title = extract_doc_title(&enriched, filename);
+                        let doc = lokb_core::Document {
+                            id: Uuid::now_v7(),
+                            source_id: source.id,
+                            external_id: filename
+                                .trim_end_matches(".md")
+                                .trim_end_matches(".txt")
+                                .to_string(),
+                            parent_id: None,
+                            depth: 0,
+                            title: title.clone(),
+                            content_type: ContentType::Article,
+                            language: None,
+                            content_hash: ContentHash::from_bytes(enriched.as_bytes()),
+                            content_size: enriched.len() as u64,
+                            created_at: Utc::now(),
+                            indexed_at: Utc::now(),
+                            privacy_level: PrivacyLevel::default(),
+                        };
+                        let chunks = chunker
+                            .chunk(&doc, &enriched)
+                            .map_err(|e| io::Error::other(e.to_string()))?;
+                        let _ = fts.index_chunks(&chunks, source_name, &title);
+
+                        eprintln!("  Summarized: {filename}");
+                        count += 1;
+                    }
+                    Ok(_) => {} // empty response, skip
+                    Err(e) => {
+                        eprintln!("  Warning: LLM failed for {filename}: {e}");
+                    }
+                }
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown enrichment step: {step}. Available: summarize"),
+                ));
+            }
+        }
+    }
+
+    Ok(count)
+}
+
 /// Entity lookup result.
 #[derive(Debug, Serialize)]
 pub struct EntityCard {

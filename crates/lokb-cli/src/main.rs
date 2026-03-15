@@ -60,6 +60,20 @@ enum Commands {
         #[arg(long, default_value = "text")]
         format: String,
     },
+    /// Enrich existing source with LLM (summarize, etc.)
+    Enrich {
+        /// Source name
+        source: String,
+        /// Enrichment step to run
+        #[arg(long, default_value = "summarize")]
+        step: String,
+        /// LLM backend spec (skip, ollama:model, openai:url:model)
+        #[arg(long, default_value = "ollama:phi3")]
+        llm: String,
+        /// Max documents to process (0 = all)
+        #[arg(long, default_value = "0")]
+        limit: usize,
+    },
     /// Look up an entity in the knowledge graph
     Entity {
         /// Entity name
@@ -166,6 +180,12 @@ fn main() {
         ),
         Commands::Read { doc_ref, section } => run_read(&doc_ref, section.as_deref()),
         Commands::Storage { command } => run_storage(command),
+        Commands::Enrich {
+            source,
+            step,
+            llm,
+            limit,
+        } => run_enrich(&source, &step, &llm, limit),
         Commands::Lookup { query, format } => run_lookup(&query, &format),
         Commands::Entity {
             name,
@@ -375,6 +395,17 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
+}
+
+fn run_enrich(
+    source: &str,
+    step: &str,
+    llm_spec: &str,
+    limit: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let count = store::enrich_source(source, step, llm_spec, limit)?;
+    println!("Enriched {count} documents with step '{step}'");
+    Ok(())
 }
 
 fn run_lookup(query: &str, format: &str) -> Result<(), Box<dyn std::error::Error>> {
