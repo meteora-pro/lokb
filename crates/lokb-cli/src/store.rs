@@ -856,6 +856,9 @@ fn ingest_telegram(
         segments.push(current_segment);
     }
 
+    // Collect unique contacts for entity extraction
+    let mut contacts: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     let mut count = 0;
     for (i, segment) in segments.iter().enumerate() {
         let mut text = format!("[{}]\n", chat_name);
@@ -863,7 +866,22 @@ fn ingest_telegram(
             let from = msg.from.as_deref().unwrap_or("Unknown");
             let time = msg.date.split('T').next_back().unwrap_or(&msg.date);
             let msg_text = extract_text(&msg.text);
-            text.push_str(&format!("{} [{}]: {}\n", from, time, msg_text));
+
+            // Track contacts
+            if let Some(ref name) = msg.from {
+                contacts.insert(name.clone());
+            }
+
+            // Format with reply/edited indicators
+            let mut line = format!("{from} [{time}]");
+            if msg.reply_to_message_id.is_some() {
+                line.push_str(" (reply)");
+            }
+            if msg.edited.is_some() {
+                line.push_str(" (edited)");
+            }
+            line.push_str(&format!(": {msg_text}\n"));
+            text.push_str(&line);
         }
         let filename = format!("segment_{:04}.txt", i);
         let external_id = format!("segment_{:04}", i);
@@ -892,6 +910,24 @@ fn ingest_telegram(
             .map_err(|e| io::Error::other(e.to_string()))?;
 
         count += 1;
+    }
+
+    // Extract Person entities from contacts (ADR-007 Pattern 1)
+    for contact_name in &contacts {
+        let entity_id = format!("person:{}", contact_name.to_lowercase().replace(' ', "_"));
+        let _ = catalog.upsert_entity(
+            &entity_id,
+            contact_name,
+            None,
+            &["Person".to_string()],
+            &std::collections::HashMap::new(),
+        );
+    }
+    if !contacts.is_empty() {
+        eprintln!(
+            "  Contacts: {} people extracted from Telegram",
+            contacts.len()
+        );
     }
 
     Ok(count)
@@ -951,10 +987,14 @@ struct TelegramExport {
 
 #[derive(Deserialize)]
 struct TelegramMessage {
+    #[allow(dead_code)]
+    id: Option<i64>,
     r#type: String,
     date: String,
     from: Option<String>,
     text: serde_json::Value,
+    reply_to_message_id: Option<i64>,
+    edited: Option<String>,
 }
 
 /// Detailed status of a single source.
