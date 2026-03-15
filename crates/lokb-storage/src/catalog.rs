@@ -415,6 +415,31 @@ impl SqliteCatalog {
     }
 
     /// Get relations for an entity.
+    /// Add a relation between two entities.
+    pub fn add_relation(
+        &self,
+        subject_id: &str,
+        predicate: &str,
+        object_id: &str,
+        source_id: DataSourceId,
+        confidence: f64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO relations (subject_id, predicate, object_id, source_id, confidence)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                subject_id,
+                predicate,
+                object_id,
+                source_id.to_string(),
+                confidence,
+            ],
+        )
+        .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     pub fn get_relations(&self, entity_id: &str) -> Result<Vec<RelationInfo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
@@ -468,6 +493,14 @@ impl SqliteCatalog {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(count as u64)
+    }
+
+    pub fn relation_count(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM relations", [], |row| row.get(0))
             .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
         Ok(count as u64)
     }

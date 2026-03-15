@@ -1254,6 +1254,8 @@ pub struct FullStorageStatus {
     pub layers: Vec<StorageLayerInfo>,
     pub total_bytes: u64,
     pub sources: Vec<SourceStorageInfo>,
+    pub entity_count: u64,
+    pub relation_count: u64,
 }
 
 /// Calculate storage status with per-source breakdown.
@@ -1294,10 +1296,19 @@ pub fn storage_status() -> io::Result<FullStorageStatus> {
         })
         .collect();
 
+    let entity_count = catalog
+        .entity_count()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let relation_count = catalog
+        .relation_count()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
     Ok(FullStorageStatus {
         layers,
         total_bytes,
         sources,
+        entity_count,
+        relation_count,
     })
 }
 
@@ -1322,15 +1333,30 @@ fn dir_size(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Extract entities from [[wikilinks]] in markdown files and register in catalog.
+/// Extract entities from [[wikilinks]] in markdown files.
+/// Creates entities, records document mentions, and builds co-occurrence relations.
 fn extract_entities_from_files(
     files: &[(String, String)],
-    _source_id: Uuid,
+    source_id: Uuid,
     catalog: &SqliteCatalog,
 ) -> u64 {
     let mut total = 0u64;
-    for (_filename, content) in files {
+
+    for (filename, content) in files {
         let wikilinks = lokb_parsers::extract_wikilinks(content);
+        if wikilinks.is_empty() {
+            continue;
+        }
+
+        // Find document_id for this file
+        let external_id = filename.trim_end_matches(".md").trim_end_matches(".txt");
+        let doc_id = catalog
+            .get_document_by_external_id(source_id, external_id)
+            .ok()
+            .flatten();
+
+        let mut doc_entity_ids: Vec<String> = Vec::new();
+
         for entity_name in wikilinks.keys() {
             let entity_id = format!("wiki:{}", entity_name.to_lowercase().replace(' ', "_"));
             let _ = catalog.upsert_entity(
@@ -1340,7 +1366,27 @@ fn extract_entities_from_files(
                 &[],
                 &std::collections::HashMap::new(),
             );
+
+            // Record mention in document
+            if let Some(did) = doc_id {
+                let _ = catalog.add_entity_mention(&entity_id, did, source_id, Some(entity_name));
+            }
+
+            doc_entity_ids.push(entity_id);
             total += 1;
+        }
+
+        // Build co-occurrence relations between entities in same document
+        for i in 0..doc_entity_ids.len() {
+            for j in (i + 1)..doc_entity_ids.len() {
+                let _ = catalog.add_relation(
+                    &doc_entity_ids[i],
+                    "co_occurs_with",
+                    &doc_entity_ids[j],
+                    source_id,
+                    1.0,
+                );
+            }
         }
     }
     total

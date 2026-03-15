@@ -345,6 +345,11 @@ fn run_storage(command: StorageCommands) -> Result<(), Box<dyn std::error::Error
                         );
                     }
                 }
+                if status.entity_count > 0 || status.relation_count > 0 {
+                    println!("\nKNOWLEDGE GRAPH");
+                    println!("  Entities:  {}", status.entity_count);
+                    println!("  Relations: {}", status.relation_count);
+                }
             }
         }
     }
