@@ -7,3 +7,4 @@ description = "Embedding models (ONNX/Candle)"
 
 [dependencies]
 lokb-core = { workspace = true }
+fastembed = { workspace = true }
