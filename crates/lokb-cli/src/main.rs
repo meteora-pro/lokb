@@ -257,22 +257,43 @@ fn run_read(doc_ref: &str, section: Option<&str>) -> Result<(), Box<dyn std::err
 fn run_storage(command: StorageCommands) -> Result<(), Box<dyn std::error::Error>> {
     match command {
         StorageCommands::Status { format } => {
-            let layers = store::storage_status()?;
+            let status = store::storage_status()?;
             if format == "json" {
-                let total: u64 = layers.iter().map(|l| l.size_bytes).sum();
-                let output = serde_json::json!({
-                    "layers": layers,
-                    "total_bytes": total,
-                });
-                println!("{}", serde_json::to_string_pretty(&output)?);
+                println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
-                for l in &layers {
-                    println!("{:<10} {} bytes", l.name, l.size_bytes);
+                println!("LAYERS");
+                for l in &status.layers {
+                    println!("  {:<10} {}", l.name, format_bytes(l.size_bytes));
+                }
+                println!("  {:<10} {}", "total", format_bytes(status.total_bytes));
+                if !status.sources.is_empty() {
+                    println!("\nSOURCES");
+                    for s in &status.sources {
+                        println!(
+                            "  {:<20} {:<10} {:>6} docs  {}",
+                            s.name,
+                            s.class,
+                            s.documents,
+                            format_bytes(s.content_bytes)
+                        );
+                    }
                 }
             }
         }
     }
     Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
 }
 
 fn run_export(output: &str, include_personal: bool) -> Result<(), Box<dyn std::error::Error>> {

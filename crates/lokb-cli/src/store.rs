@@ -797,10 +797,29 @@ pub struct StorageLayerInfo {
     pub size_bytes: u64,
 }
 
-/// Calculate storage status.
-pub fn storage_status() -> io::Result<Vec<StorageLayerInfo>> {
+/// Per-source storage breakdown.
+#[derive(Debug, Serialize)]
+pub struct SourceStorageInfo {
+    pub name: String,
+    pub class: String,
+    pub documents: u64,
+    pub content_bytes: u64,
+}
+
+/// Full storage status with per-source breakdown (ADR-003).
+#[derive(Debug, Serialize)]
+pub struct FullStorageStatus {
+    pub layers: Vec<StorageLayerInfo>,
+    pub total_bytes: u64,
+    pub sources: Vec<SourceStorageInfo>,
+}
+
+/// Calculate storage status with per-source breakdown.
+pub fn storage_status() -> io::Result<FullStorageStatus> {
+    let catalog = open_catalog()?;
     let content_store = open_content_store();
-    Ok(vec![
+
+    let layers = vec![
         StorageLayerInfo {
             name: "source".to_string(),
             size_bytes: content_store.total_size(),
@@ -813,7 +832,31 @@ pub fn storage_status() -> io::Result<Vec<StorageLayerInfo>> {
             name: "cache".to_string(),
             size_bytes: dir_size(config::cache_dir().as_ref()),
         },
-    ])
+    ];
+    let total_bytes: u64 = layers.iter().map(|l| l.size_bytes).sum();
+
+    let sources_list = catalog
+        .list_sources()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let sources = sources_list
+        .iter()
+        .map(|s| SourceStorageInfo {
+            name: s.name.clone(),
+            class: if s.class.is_public() {
+                "public".to_string()
+            } else {
+                "personal".to_string()
+            },
+            documents: s.document_count,
+            content_bytes: content_store.source_size(&s.name),
+        })
+        .collect();
+
+    Ok(FullStorageStatus {
+        layers,
+        total_bytes,
+        sources,
+    })
 }
 
 fn dir_size(path: &Path) -> u64 {
