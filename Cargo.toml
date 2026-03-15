@@ -36,3 +36,5 @@ async-trait = "0.1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 tantivy = "0.22"
 htmd = "0.5"
+zip = "2"
+quick-xml = "0.37"

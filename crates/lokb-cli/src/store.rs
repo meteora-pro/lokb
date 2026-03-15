@@ -489,6 +489,7 @@ fn ingest_raw(
             source_id,
             catalog,
         ),
+        "epub" => ingest_epub(raw_path, source_name, content_store, source_id, catalog),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -565,6 +566,38 @@ fn ingest_text_dir(
 }
 
 /// Parse Telegram export JSON and store messages as text documents.
+/// Extract chapters from EPUB and register in catalog.
+fn ingest_epub(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
+    let chapters = lokb_parsers::extract_epub(raw_path, source_id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let mut count = 0;
+    for (doc, text) in &chapters {
+        if text.is_empty() && doc.depth == 0 {
+            // Root document — register in catalog but no content file
+            catalog
+                .upsert_document(doc)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            continue;
+        }
+        let filename = format!("{}.md", doc.external_id);
+        content_store
+            .write_file(source_name, &filename, text)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        catalog
+            .upsert_document(doc)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 fn ingest_telegram(
     raw_path: &Path,
     source_name: &str,
