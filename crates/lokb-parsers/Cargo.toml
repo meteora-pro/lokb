@@ -11,3 +11,7 @@ lokb-pipeline = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+htmd = { workspace = true }
+zip = { workspace = true }
+quick-xml = { workspace = true }
+pdf-extract = { workspace = true }
