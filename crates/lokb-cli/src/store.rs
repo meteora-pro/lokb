@@ -336,52 +336,55 @@ struct RawFileInfo {
 }
 
 /// Scan raw files and return their external_ids + content.
+/// Scan directory for files with given extensions, optionally transform content.
+fn scan_dir_files(
+    raw_path: &Path,
+    extensions: &[&str],
+    transform: Option<fn(&str) -> String>,
+) -> io::Result<Vec<RawFileInfo>> {
+    let mut files = vec![];
+    for entry in fs::read_dir(raw_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ext_match = path
+            .extension()
+            .is_some_and(|ext| extensions.iter().any(|e| ext == *e));
+        if !ext_match {
+            continue;
+        }
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let mut external_id = filename.clone();
+        for ext in extensions {
+            external_id = external_id.trim_end_matches(&format!(".{ext}")).to_string();
+        }
+        let raw_content = fs::read_to_string(&path)?;
+        let content = match transform {
+            Some(f) => f(&raw_content),
+            None => raw_content,
+        };
+        let store_filename = if transform.is_some() {
+            format!("{external_id}.md")
+        } else {
+            filename
+        };
+        files.push(RawFileInfo {
+            external_id,
+            filename: store_filename,
+            content,
+        });
+    }
+    Ok(files)
+}
+
 fn scan_raw_files(raw_path: &Path, format: &str) -> io::Result<Vec<RawFileInfo>> {
     match format {
-        "markdown-dir" => {
-            let mut files = vec![];
-            for entry in fs::read_dir(raw_path)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.extension().is_some_and(|ext| ext == "md") {
-                    let filename = path.file_name().unwrap().to_string_lossy().to_string();
-                    let external_id = filename.trim_end_matches(".md").to_string();
-                    let content = fs::read_to_string(&path)?;
-                    files.push(RawFileInfo {
-                        external_id,
-                        filename,
-                        content,
-                    });
-                }
-            }
-            Ok(files)
-        }
-        "html-dir" => {
-            let mut files = vec![];
-            for entry in fs::read_dir(raw_path)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path
-                    .extension()
-                    .is_some_and(|ext| ext == "html" || ext == "htm")
-                {
-                    let filename = path.file_name().unwrap().to_string_lossy().to_string();
-                    let external_id = filename
-                        .trim_end_matches(".html")
-                        .trim_end_matches(".htm")
-                        .to_string();
-                    let html = fs::read_to_string(&path)?;
-                    let content = lokb_parsers::html::html_to_markdown(&html);
-                    // Store as .md in content store
-                    files.push(RawFileInfo {
-                        external_id,
-                        filename: filename.replace(".html", ".md").replace(".htm", ".md"),
-                        content,
-                    });
-                }
-            }
-            Ok(files)
-        }
+        "markdown-dir" => scan_dir_files(raw_path, &["md"], None),
+        "plaintext-dir" => scan_dir_files(raw_path, &["txt"], None),
+        "html-dir" => scan_dir_files(
+            raw_path,
+            &["html", "htm"],
+            Some(lokb_parsers::html::html_to_markdown),
+        ),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("incremental update not supported for format: {format}"),
@@ -456,13 +459,36 @@ fn ingest_raw(
     catalog: &SqliteCatalog,
 ) -> io::Result<u64> {
     match format {
-        "markdown-dir" => {
-            ingest_markdown_dir(raw_path, source_name, content_store, source_id, catalog)
-        }
+        "markdown-dir" => ingest_text_dir(
+            raw_path,
+            &["md"],
+            None,
+            source_name,
+            content_store,
+            source_id,
+            catalog,
+        ),
         "telegram-export" => {
             ingest_telegram(raw_path, source_name, content_store, source_id, catalog)
         }
-        "html-dir" => ingest_html_dir(raw_path, source_name, content_store, source_id, catalog),
+        "plaintext-dir" => ingest_text_dir(
+            raw_path,
+            &["txt"],
+            None,
+            source_name,
+            content_store,
+            source_id,
+            catalog,
+        ),
+        "html-dir" => ingest_text_dir(
+            raw_path,
+            &["html", "htm"],
+            Some(lokb_parsers::html::html_to_markdown),
+            source_name,
+            content_store,
+            source_id,
+            catalog,
+        ),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -470,9 +496,12 @@ fn ingest_raw(
     }
 }
 
-/// Copy markdown files and register documents in catalog.
-fn ingest_markdown_dir(
+/// Generic text directory ingestion: read files, optionally transform, store and register.
+#[allow(clippy::too_many_arguments)]
+fn ingest_text_dir(
     raw_path: &Path,
+    extensions: &[&str],
+    transform: Option<fn(&str) -> String>,
     source_name: &str,
     content_store: &FileContentStore,
     source_id: Uuid,
@@ -482,94 +511,55 @@ fn ingest_markdown_dir(
     for entry in fs::read_dir(raw_path)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "md") {
-            let file_name = path.file_name().unwrap().to_string_lossy().to_string();
-            let content = fs::read_to_string(&path)?;
-            let external_id = file_name.trim_end_matches(".md").to_string();
-            let title = extract_doc_title(&content, &file_name);
-
-            // Copy file to content store
-            content_store
-                .copy_file(source_name, &path, &file_name)
-                .map_err(|e| io::Error::other(e.to_string()))?;
-
-            // Register document in catalog (ADR-006: dedup by source_id + external_id)
-            let doc = lokb_core::Document {
-                id: Uuid::now_v7(),
-                source_id,
-                external_id,
-                parent_id: None,
-                depth: 0,
-                title,
-                content_type: ContentType::Article,
-                language: Some("en".to_string()),
-                content_hash: ContentHash::from_bytes(content.as_bytes()),
-                content_size: content.len() as u64,
-                created_at: Utc::now(),
-                indexed_at: Utc::now(),
-                privacy_level: PrivacyLevel::Public,
-            };
-            catalog
-                .upsert_document(&doc)
-                .map_err(|e| io::Error::other(e.to_string()))?;
-
-            count += 1;
-        }
-    }
-    Ok(count)
-}
-
-/// Convert HTML files to markdown and register in catalog.
-fn ingest_html_dir(
-    raw_path: &Path,
-    source_name: &str,
-    content_store: &FileContentStore,
-    source_id: Uuid,
-    catalog: &SqliteCatalog,
-) -> io::Result<u64> {
-    let mut count = 0;
-    for entry in fs::read_dir(raw_path)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path
+        let ext_match = path
             .extension()
-            .is_some_and(|ext| ext == "html" || ext == "htm")
-        {
-            let html = fs::read_to_string(&path)?;
-            let content = lokb_parsers::html::html_to_markdown(&html);
-            let filename = path.file_name().unwrap().to_string_lossy().to_string();
-            let external_id = filename
-                .trim_end_matches(".html")
-                .trim_end_matches(".htm")
-                .to_string();
-            let md_filename = format!("{external_id}.md");
-            let title = extract_doc_title(&content, &md_filename);
-
-            content_store
-                .write_file(source_name, &md_filename, &content)
-                .map_err(|e| io::Error::other(e.to_string()))?;
-
-            let doc = lokb_core::Document {
-                id: Uuid::now_v7(),
-                source_id,
-                external_id,
-                parent_id: None,
-                depth: 0,
-                title,
-                content_type: ContentType::Article,
-                language: Some("en".to_string()),
-                content_hash: ContentHash::from_bytes(content.as_bytes()),
-                content_size: content.len() as u64,
-                created_at: Utc::now(),
-                indexed_at: Utc::now(),
-                privacy_level: PrivacyLevel::Public,
-            };
-            catalog
-                .upsert_document(&doc)
-                .map_err(|e| io::Error::other(e.to_string()))?;
-
-            count += 1;
+            .is_some_and(|ext| extensions.iter().any(|e| ext == *e));
+        if !ext_match {
+            continue;
         }
+
+        let raw_content = fs::read_to_string(&path)?;
+        let content = match transform {
+            Some(f) => f(&raw_content),
+            None => raw_content,
+        };
+
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let mut external_id = filename.clone();
+        for ext in extensions {
+            external_id = external_id.trim_end_matches(&format!(".{ext}")).to_string();
+        }
+        let store_filename = if transform.is_some() {
+            format!("{external_id}.md")
+        } else {
+            filename
+        };
+        let title = extract_doc_title(&content, &store_filename);
+
+        content_store
+            .write_file(source_name, &store_filename, &content)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        let doc = lokb_core::Document {
+            id: Uuid::now_v7(),
+            source_id,
+            external_id,
+            parent_id: None,
+            depth: 0,
+            title,
+            content_type: ContentType::Article,
+            language: Some("en".to_string()),
+            content_hash: ContentHash::from_bytes(content.as_bytes()),
+            content_size: content.len() as u64,
+            created_at: Utc::now(),
+            indexed_at: Utc::now(),
+            privacy_level: PrivacyLevel::Public,
+        };
+        catalog
+            .upsert_document(&doc)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        count += 1;
     }
     Ok(count)
 }
