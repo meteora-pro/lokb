@@ -68,6 +68,9 @@ enum SourceCommands {
         /// Data class (public/personal)
         #[arg(long)]
         class: String,
+        /// Output format (text or json for machine-readable metrics)
+        #[arg(long, default_value = "text")]
+        output: String,
     },
     /// Update an existing source with new data
     Update {
@@ -140,26 +143,31 @@ fn run_source(command: SourceCommands) -> Result<(), Box<dyn std::error::Error>>
             raw,
             format,
             class,
+            output,
         } => {
             let metrics = store::add_source(&name, &raw, &format, &class)?;
-            println!("Source '{}' added successfully", name);
-            println!(
-                "  Documents: {}  Chunks: {}",
-                metrics.documents_processed, metrics.chunks_created
-            );
-            println!(
-                "  Optimize:  {:.1}s ({} → {} bytes, {:.1}x compression)",
-                metrics.optimize_time_ms as f64 / 1000.0,
-                metrics.raw_input_bytes,
-                metrics.optimized_bytes,
-                metrics.compression_ratio
-            );
-            println!(
-                "  Enrichment: {:.1}s (FTS index: {} bytes)",
-                metrics.enrichment_time_ms as f64 / 1000.0,
-                metrics.fts_index_bytes
-            );
-            println!("  Total: {:.1}s", metrics.total_time_ms as f64 / 1000.0);
+            if output == "json" {
+                println!("{}", serde_json::to_string_pretty(&metrics)?);
+            } else {
+                println!("Source '{}' added successfully", name);
+                println!(
+                    "  Documents: {}  Chunks: {}",
+                    metrics.documents_processed, metrics.chunks_created
+                );
+                println!(
+                    "  Optimize:  {:.1}s ({} → {} bytes, {:.1}x compression)",
+                    metrics.optimize_time_ms as f64 / 1000.0,
+                    metrics.raw_input_bytes,
+                    metrics.optimized_bytes,
+                    metrics.compression_ratio
+                );
+                println!(
+                    "  Enrichment: {:.1}s (FTS index: {} bytes)",
+                    metrics.enrichment_time_ms as f64 / 1000.0,
+                    metrics.fts_index_bytes
+                );
+                println!("  Total: {:.1}s", metrics.total_time_ms as f64 / 1000.0);
+            }
         }
         SourceCommands::Status { name, format } => {
             let status = store::source_status(&name)?;
