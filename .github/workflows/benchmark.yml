@@ -1,0 +1,138 @@
+name: Benchmark
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      article_count:
+        description: "Number of Wikipedia articles to extract (0 = all ~273K)"
+        required: false
+        default: "10000"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  benchmark:
+    name: Wikipedia Benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: benchmark
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build release
+        run: cargo build --release -p lokb-cli
+
+      - name: Download Wikipedia dump
+        run: |
+          mkdir -p /tmp/lokb-bench
+          curl -L -o /tmp/lokb-bench/simplewiki.xml.bz2 \
+            "https://dumps.wikimedia.org/simplewiki/latest/simplewiki-latest-pages-articles-multistream.xml.bz2"
+
+      - name: Extract articles
+        run: |
+          LIMIT="${{ github.event.inputs.article_count || '10000' }}"
+          LIMIT_ARG=""
+          if [ "$LIMIT" != "0" ]; then
+            LIMIT_ARG="--limit $LIMIT"
+          fi
+          mkdir -p /tmp/lokb-bench/wiki-md
+          bzcat /tmp/lokb-bench/simplewiki.xml.bz2 | \
+            python3 scripts/wiki-to-markdown.py /tmp/lokb-bench/wiki-md/ $LIMIT_ARG
+          echo "ARTICLE_COUNT=$(ls /tmp/lokb-bench/wiki-md/ | wc -l)" >> $GITHUB_ENV
+          echo "DATASET_SIZE=$(du -sh /tmp/lokb-bench/wiki-md/ | cut -f1)" >> $GITHUB_ENV
+
+      - name: Run benchmark
+        run: |
+          export LOKB_DATA_DIR=/tmp/lokb-bench/data
+          LOKB=./target/release/lokb
+
+          echo "## Benchmark Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Dataset:** ${{ env.ARTICLE_COUNT }} articles, ${{ env.DATASET_SIZE }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # source add with JSON metrics
+          METRICS=$($LOKB source add simplewiki \
+            --raw /tmp/lokb-bench/wiki-md/ \
+            --format markdown-dir \
+            --class public \
+            --output json)
+          echo "$METRICS" > /tmp/lokb-bench/add-metrics.json
+
+          DOCS=$(echo "$METRICS" | python3 -c "import sys,json; print(json.load(sys.stdin)['documents_processed'])")
+          CHUNKS=$(echo "$METRICS" | python3 -c "import sys,json; print(json.load(sys.stdin)['chunks_created'])")
+          OPT_MS=$(echo "$METRICS" | python3 -c "import sys,json; print(json.load(sys.stdin)['optimize_time_ms'])")
+          ENR_MS=$(echo "$METRICS" | python3 -c "import sys,json; print(json.load(sys.stdin)['enrichment_time_ms'])")
+          TOTAL_MS=$(echo "$METRICS" | python3 -c "import sys,json; print(json.load(sys.stdin)['total_time_ms'])")
+          RAW_B=$(echo "$METRICS" | python3 -c "import sys,json; print(json.load(sys.stdin)['raw_input_bytes'])")
+          OPT_B=$(echo "$METRICS" | python3 -c "import sys,json; print(json.load(sys.stdin)['optimized_bytes'])")
+          FTS_B=$(echo "$METRICS" | python3 -c "import sys,json; print(json.load(sys.stdin)['fts_index_bytes'])")
+
+          echo "### Ingestion" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Documents | $DOCS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Chunks | $CHUNKS |" >> $GITHUB_STEP_SUMMARY
+          echo "| Optimize time | ${OPT_MS}ms |" >> $GITHUB_STEP_SUMMARY
+          echo "| Enrichment time | ${ENR_MS}ms |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Total time** | **${TOTAL_MS}ms** |" >> $GITHUB_STEP_SUMMARY
+          echo "| Raw size | ${RAW_B} bytes |" >> $GITHUB_STEP_SUMMARY
+          echo "| Optimized size | ${OPT_B} bytes |" >> $GITHUB_STEP_SUMMARY
+          echo "| FTS index size | ${FTS_B} bytes |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Search benchmarks
+          echo "### Search" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Query | Results | Time |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
+
+          for query in "quantum computing" "Eiffel Tower" "machine learning" "solar system" "population growth"; do
+            START_NS=$(date +%s%N)
+            RESULT=$($LOKB search "$query" --format json 2>/dev/null)
+            END_NS=$(date +%s%N)
+            ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
+            COUNT=$(echo "$RESULT" | python3 -c "import sys,json; print(len(json.load(sys.stdin)['results']))")
+            echo "| $query | $COUNT | ${ELAPSED_MS}ms |" >> $GITHUB_STEP_SUMMARY
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Update benchmark (no changes)
+          START_NS=$(date +%s%N)
+          UPDATE=$($LOKB source update simplewiki --raw /tmp/lokb-bench/wiki-md/ 2>&1)
+          END_NS=$(date +%s%N)
+          UPDATE_MS=$(( (END_NS - START_NS) / 1000000 ))
+
+          echo "### Update (no changes)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Time | ${UPDATE_MS}ms |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | $(echo "$UPDATE" | grep 'Unchanged' | tr -d ' ') |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Storage status
+          STORAGE=$($LOKB storage status --format json)
+          TOTAL_STORAGE=$(echo "$STORAGE" | python3 -c "import sys,json; print(json.load(sys.stdin)['total_bytes'])")
+          echo "### Storage" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Total: ${TOTAL_STORAGE} bytes" >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-metrics
+          path: /tmp/lokb-bench/add-metrics.json
+          retention-days: 90
