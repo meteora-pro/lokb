@@ -2173,6 +2173,8 @@ dependencies = [
  "memmap2",
  "pdf-extract",
  "quick-xml",
+ "serde",
+ "serde_json",
  "tempfile",
  "uuid",
  "xz2",
