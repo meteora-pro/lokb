@@ -41,3 +41,21 @@ Feature: Wikipedia import and search
     When I run lokb "source add wikipedia-test --raw {fixtures}/wikipedia/ --format markdown-dir --class public"
     Then the command fails
     And the output contains "already exists"
+
+  Scenario: Source status shows details
+    Given a clean lokb data directory
+    And source "wikipedia-test" is loaded from "wikipedia/" as "markdown-dir" class "public"
+    When I run lokb "source status wikipedia-test --format json"
+    Then the command succeeds
+    And the output contains "wikipedia-test"
+    And the output contains "markdown-dir"
+
+  Scenario: Delete source removes it from list
+    Given a clean lokb data directory
+    And source "wikipedia-test" is loaded from "wikipedia/" as "markdown-dir" class "public"
+    When I run lokb "source delete wikipedia-test"
+    Then the command succeeds
+    And the output contains "deleted"
+    When I run lokb "source list --format json"
+    Then the command succeeds
+    And the JSON output has no sources

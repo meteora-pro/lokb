@@ -247,6 +247,22 @@ impl SqliteCatalog {
         Ok(())
     }
 
+    /// Delete a source and all its documents.
+    pub fn delete_source(&self, source_id: DataSourceId) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM documents WHERE source_id = ?1",
+            params![source_id.to_string()],
+        )
+        .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        conn.execute(
+            "DELETE FROM sources WHERE id = ?1",
+            params![source_id.to_string()],
+        )
+        .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     pub fn document_count(&self, source_id: DataSourceId) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn

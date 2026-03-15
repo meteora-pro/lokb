@@ -673,6 +673,39 @@ pub fn source_status(name: &str) -> io::Result<SourceStatus> {
     })
 }
 
+/// Delete a source: catalog entries, content files, FTS index entries.
+pub fn delete_source(name: &str) -> io::Result<()> {
+    let catalog = open_catalog()?;
+    let content_store = open_content_store();
+
+    let source = catalog
+        .get_source(name)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("source '{name}' not found"),
+            )
+        })?;
+
+    // Delete FTS entries for this source
+    let fts = open_fts()?;
+    fts.delete_source(&source.id.to_string())
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Delete content files
+    content_store
+        .delete_source(name)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Delete from catalog (documents + source)
+    catalog
+        .delete_source(source.id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    Ok(())
+}
+
 /// List all configured sources (from SQLite catalog).
 pub fn list_sources() -> io::Result<Vec<SourceListItem>> {
     let catalog = open_catalog()?;

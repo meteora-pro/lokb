@@ -85,6 +85,11 @@ enum SourceCommands {
         #[arg(long, default_value = "text")]
         format: String,
     },
+    /// Delete a source and all its data
+    Delete {
+        /// Source name
+        name: String,
+    },
     /// List all sources
     List {
         /// Output format
@@ -168,6 +173,10 @@ fn run_source(command: SourceCommands) -> Result<(), Box<dyn std::error::Error>>
                 println!("  Content:    {} bytes", status.content_bytes);
                 println!("  Created:    {}", status.created_at);
             }
+        }
+        SourceCommands::Delete { name } => {
+            store::delete_source(&name)?;
+            println!("Source '{}' deleted", name);
         }
         SourceCommands::Update { name, raw } => {
             let report = store::update_source(&name, &raw)?;

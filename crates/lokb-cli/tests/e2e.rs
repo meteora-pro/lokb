@@ -159,6 +159,14 @@ fn output_contains(world: &mut LokbWorld, expected: String) {
     );
 }
 
+#[then("the JSON output has no sources")]
+fn json_has_no_sources(world: &mut LokbWorld) {
+    let stdout = world.stdout();
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("invalid JSON output");
+    let sources = json["sources"].as_array().expect("no 'sources' array");
+    assert!(sources.is_empty(), "expected no sources, got: {}", stdout,);
+}
+
 #[then(expr = "the JSON output has a source named {string}")]
 fn json_has_source(world: &mut LokbWorld, name: String) {
     let stdout = world.stdout();
