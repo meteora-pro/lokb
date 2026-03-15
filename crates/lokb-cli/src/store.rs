@@ -598,6 +598,8 @@ fn ingest_raw(
         "zim" => ingest_zim(raw_path, source_name, content_store, source_id, catalog),
         "wikidata-json" => ingest_wikidata(raw_path, source_id, catalog),
         "mbox" => ingest_mbox(raw_path, source_name, content_store, source_id, catalog),
+        "gpx" => ingest_gpx(raw_path, source_name, content_store, source_id, catalog),
+        "exif-dir" => ingest_exif_dir(raw_path, source_name, content_store, source_id, catalog),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -784,6 +786,77 @@ fn ingest_zim(
 /// Sanitize filename for content store (replace path separators).
 fn sanitize_filename(name: &str) -> String {
     name.replace(['/', '\\', ':'], "_")
+}
+
+/// Parse GPX track file.
+fn ingest_gpx(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
+    let segments = lokb_parsers::gpx::parse_gpx(raw_path, source_id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let mut count = 0;
+    for (doc, text) in &segments {
+        if text.is_empty() {
+            continue;
+        }
+        let filename = format!("{}.md", doc.external_id);
+        content_store
+            .write_file(source_name, &filename, text)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        catalog
+            .upsert_document(doc)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Extract EXIF metadata from photos in a directory.
+fn ingest_exif_dir(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
+    let mut count = 0;
+    for entry in fs::read_dir(raw_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+
+        if !["jpg", "jpeg", "tiff", "tif"].contains(&ext.as_str()) {
+            continue;
+        }
+
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let external_id = filename.clone();
+
+        match lokb_parsers::exif::extract_exif(&path, source_id, &external_id) {
+            Ok((doc, text)) => {
+                let md_filename = format!("{external_id}.md");
+                content_store
+                    .write_file(source_name, &md_filename, &text)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                catalog
+                    .upsert_document(&doc)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                count += 1;
+            }
+            Err(e) => {
+                eprintln!("Warning: skipping {filename}: {e}");
+            }
+        }
+    }
+    Ok(count)
 }
 
 /// Parse MBOX email archive with threading.
