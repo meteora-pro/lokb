@@ -2093,6 +2093,7 @@ dependencies = [
  "chrono",
  "clap",
  "cucumber",
+ "flate2",
  "futures",
  "lokb-core",
  "lokb-embed",

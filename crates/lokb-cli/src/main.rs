@@ -52,6 +52,14 @@ enum Commands {
         #[command(subcommand)]
         command: StorageCommands,
     },
+    /// Quick fact lookup (entity + relations, falls back to search)
+    Lookup {
+        /// Query (e.g. "population of Paris", "capital of France")
+        query: String,
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
     /// Look up an entity in the knowledge graph
     Entity {
         /// Entity name
@@ -158,6 +166,7 @@ fn main() {
         ),
         Commands::Read { doc_ref, section } => run_read(&doc_ref, section.as_deref()),
         Commands::Storage { command } => run_storage(command),
+        Commands::Lookup { query, format } => run_lookup(&query, &format),
         Commands::Entity {
             name,
             relations,
@@ -366,6 +375,33 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
+}
+
+fn run_lookup(query: &str, format: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let result = store::fact_lookup(query)?;
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if let Some(answer) = result {
+        println!("{}", answer.answer);
+        if let Some(entity) = &answer.entity {
+            println!("  Entity: {entity}");
+        }
+        if let Some(source) = &answer.source {
+            println!("  Source: {source}");
+        }
+    } else {
+        // Fallback to search
+        let results = store::search(query, 3, None, false, false)?;
+        if results.is_empty() {
+            println!("No answer found for: {query}");
+        } else {
+            println!("No structured answer. Top search results:");
+            for r in &results {
+                println!("  [{}] {}", r.source, r.snippet);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_entity(

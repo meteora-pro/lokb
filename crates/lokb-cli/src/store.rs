@@ -596,6 +596,7 @@ fn ingest_raw(
         "epub" => ingest_epub(raw_path, source_name, content_store, source_id, catalog),
         "pdf-dir" => ingest_pdf_dir(raw_path, source_name, content_store, source_id, catalog),
         "zim" => ingest_zim(raw_path, source_name, content_store, source_id, catalog),
+        "wikidata-json" => ingest_wikidata(raw_path, source_id, catalog),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -1333,6 +1334,56 @@ fn dir_size(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Ingest Wikidata JSON dump into entity store.
+fn ingest_wikidata(raw_path: &Path, source_id: Uuid, catalog: &SqliteCatalog) -> io::Result<u64> {
+    let file = fs::File::open(raw_path)?;
+    let reader: Box<dyn std::io::Read> = if raw_path.extension().is_some_and(|ext| ext == "gz") {
+        Box::new(flate2::read::GzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+
+    let config = lokb_parsers::wikidata::WikidataConfig::default();
+    let mut count = 0u64;
+
+    lokb_parsers::wikidata::parse_wikidata(reader, &config, |entity| {
+        let en_label = entity.labels.get("en").cloned().unwrap_or_default();
+        let entity_id = format!("wikidata:{}", entity.qid);
+
+        let mut external_ids = std::collections::HashMap::new();
+        external_ids.insert("wikidata".to_string(), entity.qid.clone());
+
+        let entity_types: Vec<String> = entity.entity_type.iter().cloned().collect();
+
+        let _ = catalog.upsert_entity(
+            &entity_id,
+            &en_label,
+            entity.description.as_deref(),
+            &entity_types,
+            &external_ids,
+        );
+
+        // Add relations from properties
+        for prop in &entity.properties {
+            if let lokb_parsers::wikidata::WikidataValue::EntityRef(ref target_qid) = prop.value {
+                let target_id = format!("wikidata:{target_qid}");
+                let _ = catalog.add_relation(
+                    &entity_id,
+                    prop.property_label,
+                    &target_id,
+                    source_id,
+                    1.0,
+                );
+            }
+        }
+
+        count += 1;
+    })
+    .map_err(|e| io::Error::other(e.to_string()))?;
+
+    Ok(count)
+}
+
 /// Extract entities from [[wikilinks]] in markdown files.
 /// Creates entities, records document mentions, and builds co-occurrence relations.
 fn extract_entities_from_files(
@@ -1457,6 +1508,95 @@ pub fn entity_search(
     catalog
         .search_entities(query, limit)
         .map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// Result of a structured fact lookup.
+#[derive(Debug, Serialize)]
+pub struct FactAnswer {
+    pub answer: String,
+    pub entity: Option<String>,
+    pub property: Option<String>,
+    pub source: Option<String>,
+}
+
+/// Try to answer a fact query from the knowledge graph.
+/// Parses patterns like "population of Paris", "capital of France".
+pub fn fact_lookup(query: &str) -> io::Result<Option<FactAnswer>> {
+    let catalog = open_catalog()?;
+    let query_lower = query.to_lowercase();
+
+    // Try to extract entity name from query
+    // Patterns: "X of Y", "Y X", "what is Y"
+    let entity_name = if let Some(pos) = query_lower.find(" of ") {
+        Some(query[pos + 4..].trim().to_string())
+    } else {
+        // Try last word(s) as entity name
+        let words: Vec<&str> = query.split_whitespace().collect();
+        if words.len() >= 2 {
+            Some(words[1..].join(" "))
+        } else {
+            None
+        }
+    };
+
+    let entity_name = match entity_name {
+        Some(n) => n,
+        None => return Ok(None),
+    };
+
+    // Look up entity
+    let entity = catalog
+        .get_entity_by_name(&entity_name)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let entity = match entity {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+
+    // Get relations and try to match query pattern
+    let relations = catalog
+        .get_relations(&entity.id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Extract property hint from query
+    let property_hint = if let Some(pos) = query_lower.find(" of ") {
+        query_lower[..pos].trim().to_string()
+    } else {
+        query_lower
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    };
+
+    // Try to find matching relation
+    for rel in &relations {
+        let pred_lower = rel.predicate.to_lowercase();
+        if pred_lower.contains(&property_hint) || property_hint.contains(&pred_lower) {
+            return Ok(Some(FactAnswer {
+                answer: format!(
+                    "{}: {} → {}",
+                    entity.canonical_name, rel.predicate, rel.target_name
+                ),
+                entity: Some(entity.canonical_name.clone()),
+                property: Some(rel.predicate.clone()),
+                source: Some("knowledge_graph".to_string()),
+            }));
+        }
+    }
+
+    // If entity found but no matching relation, return entity description
+    if let Some(ref desc) = entity.description {
+        return Ok(Some(FactAnswer {
+            answer: format!("{}: {}", entity.canonical_name, desc),
+            entity: Some(entity.canonical_name),
+            property: None,
+            source: Some("knowledge_graph".to_string()),
+        }));
+    }
+
+    Ok(None)
 }
 
 /// Export public sources.
