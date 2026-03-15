@@ -1,3 +1,4 @@
+pub mod csv_data;
 pub mod epub;
 pub mod exif;
 pub mod gpx;

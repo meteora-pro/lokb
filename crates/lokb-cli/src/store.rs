@@ -600,6 +600,7 @@ fn ingest_raw(
         "mbox" => ingest_mbox(raw_path, source_name, content_store, source_id, catalog),
         "gpx" => ingest_gpx(raw_path, source_name, content_store, source_id, catalog),
         "exif-dir" => ingest_exif_dir(raw_path, source_name, content_store, source_id, catalog),
+        "csv" | "tsv" => ingest_csv(raw_path, source_name, content_store, source_id, catalog),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -786,6 +787,26 @@ fn ingest_zim(
 /// Sanitize filename for content store (replace path separators).
 fn sanitize_filename(name: &str) -> String {
     name.replace(['/', '\\', ':'], "_")
+}
+
+/// Parse CSV/TSV data file.
+fn ingest_csv(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
+    let (doc, text) = lokb_parsers::csv_data::parse_csv(raw_path, source_id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let filename = format!("{}.md", doc.external_id);
+    content_store
+        .write_file(source_name, &filename, &text)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    catalog
+        .upsert_document(&doc)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(1)
 }
 
 /// Parse GPX track file.
