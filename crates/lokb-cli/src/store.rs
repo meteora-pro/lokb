@@ -196,7 +196,14 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
         .map_err(|e| io::Error::other(e.to_string()))? as u64;
     let enrichment_time = enrichment_start.elapsed();
 
-    // Phase 3: Optional embedding (background in future, inline for now)
+    // Phase 3: Entity extraction from [[wikilinks]] (ADR-007 Pattern 1)
+    let entities_extracted = extract_entities_from_files(&files, source_id, &catalog);
+
+    if entities_extracted > 0 {
+        eprintln!("  Entities: {entities_extracted} extracted from wikilinks");
+    }
+
+    // Phase 4: Optional embedding (background in future, inline for now)
     let embed_start = std::time::Instant::now();
     let vectors_created = match embed_chunks(name, &files, format, class, &chunker) {
         Ok(count) => count,
@@ -1313,6 +1320,97 @@ fn dir_size(path: &Path) -> u64 {
                 .sum()
         })
         .unwrap_or(0)
+}
+
+/// Extract entities from [[wikilinks]] in markdown files and register in catalog.
+fn extract_entities_from_files(
+    files: &[(String, String)],
+    _source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> u64 {
+    let mut total = 0u64;
+    for (_filename, content) in files {
+        let wikilinks = lokb_parsers::extract_wikilinks(content);
+        for entity_name in wikilinks.keys() {
+            let entity_id = format!("wiki:{}", entity_name.to_lowercase().replace(' ', "_"));
+            let _ = catalog.upsert_entity(
+                &entity_id,
+                entity_name,
+                None,
+                &[],
+                &std::collections::HashMap::new(),
+            );
+            total += 1;
+        }
+    }
+    total
+}
+
+/// Entity lookup result.
+#[derive(Debug, Serialize)]
+pub struct EntityCard {
+    pub canonical_name: String,
+    pub description: Option<String>,
+    pub entity_types: Vec<String>,
+    pub mention_count: i64,
+    pub relations: Vec<lokb_storage::catalog::RelationInfo>,
+    pub documents: Vec<String>,
+}
+
+/// Look up an entity by name.
+pub fn entity_lookup(
+    name: &str,
+    include_relations: bool,
+    include_documents: bool,
+) -> io::Result<Option<EntityCard>> {
+    let catalog = open_catalog()?;
+    let entity = catalog
+        .get_entity_by_name(name)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    match entity {
+        None => Ok(None),
+        Some(info) => {
+            let relations = if include_relations {
+                catalog
+                    .get_relations(&info.id)
+                    .map_err(|e| io::Error::other(e.to_string()))?
+            } else {
+                vec![]
+            };
+
+            let documents = if include_documents {
+                catalog
+                    .get_entity_documents(&info.id)
+                    .map_err(|e| io::Error::other(e.to_string()))?
+            } else {
+                vec![]
+            };
+
+            let entity_types: Vec<String> =
+                serde_json::from_str(&info.entity_types).unwrap_or_default();
+
+            Ok(Some(EntityCard {
+                canonical_name: info.canonical_name,
+                description: info.description,
+                entity_types,
+                mention_count: info.mention_count,
+                relations,
+                documents,
+            }))
+        }
+    }
+}
+
+/// Search entities by prefix.
+pub fn entity_search(
+    query: &str,
+    limit: usize,
+) -> io::Result<Vec<lokb_storage::catalog::EntityInfo>> {
+    let catalog = open_catalog()?;
+    catalog
+        .search_entities(query, limit)
+        .map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// Export public sources.

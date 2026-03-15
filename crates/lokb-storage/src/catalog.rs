@@ -67,6 +67,41 @@ impl SqliteCatalog {
 
             CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source_id);
             CREATE INDEX IF NOT EXISTS idx_documents_external ON documents(source_id, external_id);
+
+            CREATE TABLE IF NOT EXISTS entities (
+                id              TEXT PRIMARY KEY,
+                canonical_name  TEXT NOT NULL,
+                description     TEXT,
+                entity_types    TEXT NOT NULL DEFAULT '[]',
+                external_ids    TEXT NOT NULL DEFAULT '{}',
+                latitude        REAL,
+                longitude       REAL,
+                mention_count   INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(canonical_name);
+
+            CREATE TABLE IF NOT EXISTS relations (
+                subject_id      TEXT NOT NULL REFERENCES entities(id),
+                predicate       TEXT NOT NULL,
+                object_id       TEXT NOT NULL REFERENCES entities(id),
+                source_id       TEXT,
+                confidence      REAL NOT NULL DEFAULT 1.0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_relations_subject ON relations(subject_id);
+            CREATE INDEX IF NOT EXISTS idx_relations_object ON relations(object_id);
+
+            CREATE TABLE IF NOT EXISTS entity_mentions (
+                entity_id       TEXT NOT NULL REFERENCES entities(id),
+                document_id     TEXT NOT NULL REFERENCES documents(id),
+                source_id       TEXT NOT NULL,
+                mention_text    TEXT,
+                UNIQUE(entity_id, document_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_mentions_entity ON entity_mentions(entity_id);
+            CREATE INDEX IF NOT EXISTS idx_mentions_document ON entity_mentions(document_id);
             ",
         )
         .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
@@ -274,6 +309,187 @@ impl SqliteCatalog {
             .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
         Ok(count as u64)
     }
+
+    // ── Entity operations ────────────────────────────────────────
+
+    /// Upsert entity by canonical_name. Increments mention_count.
+    pub fn upsert_entity(
+        &self,
+        id: &str,
+        canonical_name: &str,
+        description: Option<&str>,
+        entity_types: &[String],
+        external_ids: &std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let types_json = serde_json::to_string(entity_types)?;
+        let ext_json = serde_json::to_string(external_ids)?;
+        conn.execute(
+            "INSERT INTO entities (id, canonical_name, description, entity_types, external_ids, mention_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)
+             ON CONFLICT(id) DO UPDATE SET
+                mention_count = mention_count + 1,
+                description = COALESCE(excluded.description, entities.description)",
+            params![id, canonical_name, description, types_json, ext_json],
+        )
+        .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Add entity mention in a document.
+    pub fn add_entity_mention(
+        &self,
+        entity_id: &str,
+        document_id: DocumentId,
+        source_id: DataSourceId,
+        mention_text: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO entity_mentions (entity_id, document_id, source_id, mention_text)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                entity_id,
+                document_id.to_string(),
+                source_id.to_string(),
+                mention_text,
+            ],
+        )
+        .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Get entity by name (case-insensitive search).
+    pub fn get_entity_by_name(&self, name: &str) -> Result<Option<EntityInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, canonical_name, description, entity_types, external_ids, mention_count
+                 FROM entities WHERE canonical_name = ?1 COLLATE NOCASE LIMIT 1",
+            )
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        let result = stmt
+            .query_row(params![name], |row| {
+                Ok(EntityInfo {
+                    id: row.get(0)?,
+                    canonical_name: row.get(1)?,
+                    description: row.get(2)?,
+                    entity_types: row.get::<_, String>(3)?,
+                    external_ids: row.get::<_, String>(4)?,
+                    mention_count: row.get(5)?,
+                })
+            })
+            .optional()
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(result)
+    }
+
+    /// Search entities by prefix.
+    pub fn search_entities(&self, query: &str, limit: usize) -> Result<Vec<EntityInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, canonical_name, description, entity_types, external_ids, mention_count
+                 FROM entities WHERE canonical_name LIKE ?1 COLLATE NOCASE
+                 ORDER BY mention_count DESC LIMIT ?2",
+            )
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        let pattern = format!("{query}%");
+        let rows = stmt
+            .query_map(params![pattern, limit as i64], |row| {
+                Ok(EntityInfo {
+                    id: row.get(0)?,
+                    canonical_name: row.get(1)?,
+                    description: row.get(2)?,
+                    entity_types: row.get::<_, String>(3)?,
+                    external_ids: row.get::<_, String>(4)?,
+                    mention_count: row.get(5)?,
+                })
+            })
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        let mut entities = Vec::new();
+        for row in rows {
+            entities.push(row.map_err(|e| lokb_core::Error::Storage(e.to_string()))?);
+        }
+        Ok(entities)
+    }
+
+    /// Get relations for an entity.
+    pub fn get_relations(&self, entity_id: &str) -> Result<Vec<RelationInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT r.predicate, e.canonical_name, r.confidence
+                 FROM relations r
+                 JOIN entities e ON e.id = r.object_id
+                 WHERE r.subject_id = ?1
+                 ORDER BY r.confidence DESC",
+            )
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![entity_id], |row| {
+                Ok(RelationInfo {
+                    predicate: row.get(0)?,
+                    target_name: row.get(1)?,
+                    confidence: row.get(2)?,
+                })
+            })
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        let mut rels = Vec::new();
+        for row in rows {
+            rels.push(row.map_err(|e| lokb_core::Error::Storage(e.to_string()))?);
+        }
+        Ok(rels)
+    }
+
+    /// Get documents mentioning an entity.
+    pub fn get_entity_documents(&self, entity_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT d.title FROM entity_mentions em
+                 JOIN documents d ON d.id = em.document_id
+                 WHERE em.entity_id = ?1
+                 ORDER BY d.title LIMIT 50",
+            )
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![entity_id], |row| row.get::<_, String>(0))
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        let mut titles = Vec::new();
+        for row in rows {
+            titles.push(row.map_err(|e| lokb_core::Error::Storage(e.to_string()))?);
+        }
+        Ok(titles)
+    }
+
+    /// Count total entities.
+    pub fn entity_count(&self) -> Result<u64> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(count as u64)
+    }
+}
+
+/// Entity info from catalog.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EntityInfo {
+    pub id: String,
+    pub canonical_name: String,
+    pub description: Option<String>,
+    pub entity_types: String,
+    pub external_ids: String,
+    pub mention_count: i64,
+}
+
+/// Relation info from catalog.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RelationInfo {
+    pub predicate: String,
+    pub target_name: String,
+    pub confidence: f64,
 }
 
 use rusqlite::OptionalExtension;

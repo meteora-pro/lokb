@@ -52,6 +52,20 @@ enum Commands {
         #[command(subcommand)]
         command: StorageCommands,
     },
+    /// Look up an entity in the knowledge graph
+    Entity {
+        /// Entity name
+        name: String,
+        /// Show relations
+        #[arg(long)]
+        relations: bool,
+        /// Show documents mentioning this entity
+        #[arg(long)]
+        documents: bool,
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
     /// Export knowledge base
     Export {
         /// Output file path
@@ -144,6 +158,12 @@ fn main() {
         ),
         Commands::Read { doc_ref, section } => run_read(&doc_ref, section.as_deref()),
         Commands::Storage { command } => run_storage(command),
+        Commands::Entity {
+            name,
+            relations,
+            documents,
+            format,
+        } => run_entity(&name, relations, documents, &format),
         Commands::Export {
             output,
             include_personal,
@@ -341,6 +361,58 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
+}
+
+fn run_entity(
+    name: &str,
+    show_relations: bool,
+    show_documents: bool,
+    format: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = store::entity_lookup(name, show_relations, show_documents)?;
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        match result {
+            Some(entity) => {
+                println!("Entity: {}", entity.canonical_name);
+                if let Some(desc) = &entity.description {
+                    println!("  {desc}");
+                }
+                println!("  Mentions: {}", entity.mention_count);
+                if !entity.relations.is_empty() {
+                    println!("\n  Relations:");
+                    for rel in &entity.relations {
+                        println!(
+                            "    {} → {} ({:.0}%)",
+                            rel.predicate,
+                            rel.target_name,
+                            rel.confidence * 100.0
+                        );
+                    }
+                }
+                if !entity.documents.is_empty() {
+                    println!("\n  Documents:");
+                    for doc in &entity.documents {
+                        println!("    - {doc}");
+                    }
+                }
+            }
+            None => {
+                // Try fuzzy search
+                let suggestions = store::entity_search(name, 5)?;
+                if suggestions.is_empty() {
+                    println!("Entity '{name}' not found.");
+                } else {
+                    println!("Entity '{name}' not found. Did you mean:");
+                    for s in &suggestions {
+                        println!("  - {} ({} mentions)", s.canonical_name, s.mention_count);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_export(output: &str, include_personal: bool) -> Result<(), Box<dyn std::error::Error>> {
