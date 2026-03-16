@@ -39,13 +39,19 @@ enum Commands {
         #[arg(long)]
         public_only: bool,
     },
-    /// Read a document
+    /// Read a document (TUI viewer if terminal)
     Read {
         /// Document reference (source:document_id)
         doc_ref: String,
         /// Section to read
         #[arg(long)]
         section: Option<String>,
+        /// Highlight text in TUI viewer
+        #[arg(long)]
+        highlight: Option<String>,
+        /// Force plain text output (no TUI)
+        #[arg(long)]
+        plain: bool,
     },
     /// Storage management
     Storage {
@@ -195,7 +201,12 @@ fn main() {
             personal_only,
             public_only,
         ),
-        Commands::Read { doc_ref, section } => run_read(&doc_ref, section.as_deref()),
+        Commands::Read {
+            doc_ref,
+            section,
+            highlight,
+            plain,
+        } => run_read(&doc_ref, section.as_deref(), highlight.as_deref(), plain),
         Commands::Storage { command } => run_storage(command),
         Commands::Enrich {
             source,
@@ -347,9 +358,15 @@ fn run_search(
     Ok(())
 }
 
-fn run_read(doc_ref: &str, section: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_read(
+    doc_ref: &str,
+    section: Option<&str>,
+    highlight: Option<&str>,
+    plain: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let content = store::read_document(doc_ref)?;
-    match section {
+
+    let display_content = match section {
         Some(section_name) => {
             let section_header = format!("## {}", section_name);
             let mut in_section = false;
@@ -373,9 +390,15 @@ fn run_read(doc_ref: &str, section: Option<&str>) -> Result<(), Box<dyn std::err
                 eprintln!("Section '{}' not found", section_name);
                 std::process::exit(1);
             }
-            print!("{output}");
+            output
         }
-        None => print!("{content}"),
+        None => content,
+    };
+
+    if plain {
+        print!("{display_content}");
+    } else {
+        lokb_render::view_document(doc_ref, &display_content, highlight)?;
     }
     Ok(())
 }

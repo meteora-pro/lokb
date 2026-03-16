@@ -29,6 +29,7 @@ tar = { workspace = true }
 zstd = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
+lokb-render = { path = "../lokb-render" }
 
 [dev-dependencies]
 cucumber = "0.22"
