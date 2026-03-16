@@ -130,6 +130,9 @@ enum SourceCommands {
         /// Output format (text or json for machine-readable metrics)
         #[arg(long, default_value = "text")]
         output: String,
+        /// Watch directory for changes and auto-sync
+        #[arg(long)]
+        watch: bool,
     },
     /// Update an existing source with new data
     Update {
@@ -235,7 +238,12 @@ fn run_source(command: SourceCommands) -> Result<(), Box<dyn std::error::Error>>
             format,
             class,
             output,
+            watch,
         } => {
+            if watch {
+                store::watch_source(&name, &raw, &format, &class)?;
+                return Ok(());
+            }
             let metrics = store::add_source(&name, &raw, &format, &class)?;
             if output == "json" {
                 println!("{}", serde_json::to_string_pretty(&metrics)?);

@@ -27,6 +27,8 @@ serde_json = { workspace = true }
 flate2 = { workspace = true }
 tar = { workspace = true }
 zstd = { workspace = true }
+notify = { workspace = true }
+notify-debouncer-mini = { workspace = true }
 
 [dev-dependencies]
 cucumber = "0.22"

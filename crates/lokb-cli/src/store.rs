@@ -2045,3 +2045,68 @@ pub fn import(input: &str) -> io::Result<u64> {
 }
 
 use std::io::Read as StdRead;
+
+/// Watch a directory for changes and auto-ingest (#36).
+pub fn watch_source(name: &str, raw: &str, format: &str, class: &str) -> io::Result<()> {
+    use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let raw_path = PathBuf::from(raw);
+    if !raw_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("watch path not found: {raw}"),
+        ));
+    }
+
+    // Initial import if source doesn't exist
+    let catalog = open_catalog()?;
+    let exists = catalog
+        .get_source(name)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .is_some();
+    if !exists {
+        eprintln!("Initial import of '{name}'...");
+        add_source(name, raw, format, class)?;
+    }
+
+    eprintln!("Watching {raw} for changes (Ctrl+C to stop)...");
+
+    let (tx, rx) = mpsc::channel();
+    let mut debouncer = new_debouncer(Duration::from_secs(5), tx)
+        .map_err(|e| io::Error::other(format!("watcher init: {e}")))?;
+
+    debouncer
+        .watcher()
+        .watch(&raw_path, RecursiveMode::Recursive)
+        .map_err(|e| io::Error::other(format!("watch: {e}")))?;
+
+    loop {
+        match rx.recv() {
+            Ok(Ok(events)) => {
+                let changed_count = events.len();
+                if changed_count > 0 {
+                    eprintln!("Changes detected ({changed_count} events), re-syncing...");
+                    match update_source(name, raw) {
+                        Ok(report) => {
+                            eprintln!(
+                                "  New: {}, Changed: {}, Unchanged: {}, Deleted: {}",
+                                report.new_count,
+                                report.changed_count,
+                                report.unchanged_count,
+                                report.deleted_count
+                            );
+                        }
+                        Err(e) => eprintln!("  Sync error: {e}"),
+                    }
+                }
+            }
+            Ok(Err(e)) => eprintln!("Watch error: {e:?}"),
+            Err(e) => {
+                eprintln!("Channel closed: {e}");
+                return Ok(());
+            }
+        }
+    }
+}
