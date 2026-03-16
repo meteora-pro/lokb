@@ -499,6 +499,7 @@ fn run_build_index(source: &str) -> Result<(), Box<dyn std::error::Error>> {
     let metrics = store::build_substring_index(source)?;
     println!("FM-index built:");
     println!("  Documents: {}", metrics.documents);
+    println!("  Blocks: {}", metrics.blocks);
     println!(
         "  Text: {} bytes → Index: {} bytes",
         metrics.text_bytes, metrics.index_bytes
