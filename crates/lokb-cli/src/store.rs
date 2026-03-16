@@ -1773,10 +1773,60 @@ pub fn enrich_source(
                     }
                 }
             }
+            "image_describe" => {
+                // Describe image via vision LLM (requires multimodal model)
+                let prompt = format!(
+                    "Describe this photo metadata in one sentence:\n\n{}",
+                    &content[..content.len().min(500)]
+                );
+                match backend.generate(&prompt, &lokb_llm::LlmOptions::default()) {
+                    Ok(description) if !description.is_empty() => {
+                        let enriched = format!("{content}\n\n## Description\n\n{description}");
+                        content_store
+                            .write_file(source_name, filename, &enriched)
+                            .map_err(|e| io::Error::other(e.to_string()))?;
+                        eprintln!("  Described: {filename}");
+                        count += 1;
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("  Warning: LLM failed for {filename}: {e}"),
+                }
+            }
+            "extract_entities" => {
+                // NER via LLM (fallback for sources without structured entity extraction)
+                let prompt = format!(
+                    "List the named entities (people, places, organizations) in this text, one per line:\n\n{}",
+                    &content[..content.len().min(2000)]
+                );
+                match backend.generate(&prompt, &lokb_llm::LlmOptions::default()) {
+                    Ok(entities_text) if !entities_text.is_empty() => {
+                        for line in entities_text.lines() {
+                            let entity_name = line.trim().trim_start_matches("- ");
+                            if !entity_name.is_empty() && entity_name.len() < 100 {
+                                let entity_id =
+                                    format!("ner:{}", entity_name.to_lowercase().replace(' ', "_"));
+                                let _ = catalog.upsert_entity(
+                                    &entity_id,
+                                    entity_name,
+                                    None,
+                                    &[],
+                                    &std::collections::HashMap::new(),
+                                );
+                            }
+                        }
+                        eprintln!("  NER: {filename}");
+                        count += 1;
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("  Warning: LLM failed for {filename}: {e}"),
+                }
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("unknown enrichment step: {step}. Available: summarize"),
+                    format!(
+                        "unknown enrichment step: {step}. Available: summarize, image_describe, extract_entities"
+                    ),
                 ));
             }
         }
