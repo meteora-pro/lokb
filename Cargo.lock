@@ -2295,6 +2295,7 @@ dependencies = [
  "lokb-pipeline",
  "lokb-search",
  "lokb-storage",
+ "lokb-tools",
  "serde",
  "serde_json",
  "tokio",
@@ -2311,6 +2312,20 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "lokb-tools"
+version = "0.1.0"
+dependencies = [
+ "lokb-core",
+ "lokb-ingest",
+ "lokb-parsers",
+ "lokb-pipeline",
+ "lokb-search",
+ "lokb-storage",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

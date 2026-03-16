@@ -88,11 +88,14 @@ enum Commands {
         #[arg(long, default_value = "text")]
         format: String,
     },
-    /// Start HTTP API server
+    /// Start HTTP API server or MCP server
     Serve {
-        /// Port number
+        /// Port number (HTTP mode)
         #[arg(long, default_value = "7890")]
         port: u16,
+        /// Run as MCP server on stdin/stdout
+        #[arg(long)]
+        mcp: bool,
     },
     /// Export knowledge base
     Export {
@@ -199,7 +202,13 @@ fn main() {
             documents,
             format,
         } => run_entity(&name, relations, documents, &format),
-        Commands::Serve { port } => run_serve(port),
+        Commands::Serve { port, mcp } => {
+            if mcp {
+                run_mcp()
+            } else {
+                run_serve(port)
+            }
+        }
         Commands::Export {
             output,
             include_personal,
@@ -402,6 +411,11 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
+}
+
+fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {
+    lokb_serve::mcp::run_mcp_server()?;
+    Ok(())
 }
 
 fn run_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {

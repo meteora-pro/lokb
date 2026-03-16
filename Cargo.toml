@@ -13,6 +13,7 @@ members = [
     "crates/lokb-graph",
     "crates/lokb-render",
     "crates/lokb-serve",
+    "crates/lokb-tools",
     "crates/lokb-cli",
 ]
 

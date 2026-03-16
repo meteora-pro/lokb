@@ -1,9 +1,9 @@
 [package]
-name = "lokb-serve"
+name = "lokb-tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "HTTP server (axum), MCP"
+description = "Shared tool functions for CLI, MCP, and HTTP transports"
 
 [dependencies]
 lokb-core = { workspace = true }
@@ -11,8 +11,6 @@ lokb-storage = { workspace = true }
 lokb-search = { path = "../lokb-search" }
 lokb-ingest = { path = "../lokb-ingest" }
 lokb-pipeline = { workspace = true }
-lokb-tools = { path = "../lokb-tools" }
-axum = { workspace = true }
-tokio = { workspace = true }
+lokb-parsers = { path = "../lokb-parsers" }
 serde = { workspace = true }
 serde_json = { workspace = true }
