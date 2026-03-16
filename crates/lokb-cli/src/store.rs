@@ -71,7 +71,13 @@ pub struct IngestMetrics {
 }
 
 /// Save source config and ingest raw data. Returns metrics.
-pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Result<IngestMetrics> {
+pub fn add_source(
+    name: &str,
+    raw: &str,
+    format: &str,
+    class: &str,
+    no_embed: bool,
+) -> io::Result<IngestMetrics> {
     use std::time::Instant;
     let total_start = Instant::now();
 
@@ -203,13 +209,39 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
         eprintln!("  Entities: {entities_extracted} extracted from wikilinks");
     }
 
-    // Phase 4: Optional embedding (background in future, inline for now)
+    // Phase 4: FM-index (substring search, ADR-008)
+    let fm_path = config::derived_dir().join("fmindex");
+    let fm_index =
+        lokb_search::SubstringIndex::open(&fm_path).map_err(|e| io::Error::other(e.to_string()))?;
+    let fm_titles: Vec<String> = files.iter().map(|(f, t)| extract_doc_title(t, f)).collect();
+    let fm_docs: Vec<(&str, &str, &str)> = files
+        .iter()
+        .zip(fm_titles.iter())
+        .map(|((_, text), title)| (name, title.as_str(), text.as_str()))
+        .collect();
+    match fm_index.build(&fm_docs) {
+        Ok(m) => {
+            if m.documents > 0 {
+                eprintln!(
+                    "  FM-index: {}ms ({} docs, {} bytes)",
+                    m.build_time_ms, m.documents, m.index_bytes
+                );
+            }
+        }
+        Err(e) => eprintln!("  FM-index skipped: {e}"),
+    }
+
+    // Phase 5: Optional embedding (skip with --no-embed for large datasets)
     let embed_start = std::time::Instant::now();
-    let vectors_created = match embed_chunks(name, &files, format, class, &chunker) {
-        Ok(count) => count,
-        Err(e) => {
-            eprintln!("Warning: embedding skipped: {e}");
-            0
+    let vectors_created = if no_embed {
+        0
+    } else {
+        match embed_chunks(name, &files, format, class, &chunker) {
+            Ok(count) => count,
+            Err(e) => {
+                eprintln!("Warning: embedding skipped: {e}");
+                0
+            }
         }
     };
     let embed_time = embed_start.elapsed();
@@ -1835,6 +1867,81 @@ pub fn enrich_source(
     Ok(count)
 }
 
+/// Substring search result.
+#[derive(Debug, Serialize)]
+pub struct SubstringResult {
+    pub pattern: String,
+    pub total_count: usize,
+    pub hits: Vec<lokb_search::substring::SubstringHit>,
+}
+
+/// Search for exact substring via FM-index.
+pub fn substring_search(pattern: &str, limit: usize) -> io::Result<SubstringResult> {
+    let fm_path = config::derived_dir().join("fmindex");
+    let index =
+        lokb_search::SubstringIndex::open(&fm_path).map_err(|e| io::Error::other(e.to_string()))?;
+
+    if !index.is_built() {
+        return Ok(SubstringResult {
+            pattern: pattern.to_string(),
+            total_count: 0,
+            hits: vec![],
+        });
+    }
+
+    let total_count = index
+        .count(pattern)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let hits = index
+        .search(pattern, limit)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    Ok(SubstringResult {
+        pattern: pattern.to_string(),
+        total_count,
+        hits,
+    })
+}
+
+/// Build FM-index for a source (or all sources).
+pub fn build_substring_index(
+    source_filter: &str,
+) -> io::Result<lokb_search::substring::BuildMetrics> {
+    let content_store = open_content_store();
+    let catalog = open_catalog()?;
+    let sources = catalog
+        .list_sources()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let mut documents: Vec<(String, String, String)> = Vec::new();
+
+    for source in &sources {
+        if source_filter != "all" && source.name != source_filter {
+            continue;
+        }
+        let files = content_store
+            .list_files(&source.name)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        for (filename, text) in files {
+            let title = extract_doc_title(&text, &filename);
+            documents.push((source.name.clone(), title, text));
+        }
+    }
+
+    let fm_path = config::derived_dir().join("fmindex");
+    let index =
+        lokb_search::SubstringIndex::open(&fm_path).map_err(|e| io::Error::other(e.to_string()))?;
+
+    let doc_refs: Vec<(&str, &str, &str)> = documents
+        .iter()
+        .map(|(s, t, text)| (s.as_str(), t.as_str(), text.as_str()))
+        .collect();
+
+    index
+        .build(&doc_refs)
+        .map_err(|e| io::Error::other(e.to_string()))
+}
+
 /// Entity lookup result.
 #[derive(Debug, Serialize)]
 pub struct EntityCard {
@@ -2118,7 +2225,7 @@ pub fn watch_source(name: &str, raw: &str, format: &str, class: &str) -> io::Res
         .is_some();
     if !exists {
         eprintln!("Initial import of '{name}'...");
-        add_source(name, raw, format, class)?;
+        add_source(name, raw, format, class, true)?;
     }
 
     eprintln!("Watching {raw} for changes (Ctrl+C to stop)...");
