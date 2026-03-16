@@ -88,6 +88,22 @@ enum Commands {
         #[arg(long, default_value = "text")]
         format: String,
     },
+    /// Exact substring search via FM-index
+    Substring {
+        /// Pattern to search for
+        pattern: String,
+        /// Max results
+        #[arg(long, default_value = "10")]
+        limit: usize,
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Build FM-index for substring search
+    BuildIndex {
+        /// Source name (or "all" for all sources)
+        source: String,
+    },
     /// Start HTTP API server
     Serve {
         /// Port number
@@ -199,6 +215,12 @@ fn main() {
             documents,
             format,
         } => run_entity(&name, relations, documents, &format),
+        Commands::Substring {
+            pattern,
+            limit,
+            format,
+        } => run_substring(&pattern, limit, &format),
+        Commands::BuildIndex { source } => run_build_index(&source),
         Commands::Serve { port } => run_serve(port),
         Commands::Export {
             output,
@@ -402,6 +424,37 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
+}
+
+fn run_substring(
+    pattern: &str,
+    limit: usize,
+    format: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = store::substring_search(pattern, limit)?;
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if result.hits.is_empty() {
+        println!("No matches for: {pattern}");
+    } else {
+        println!("{} occurrence(s) of \"{}\":", result.total_count, pattern);
+        for hit in &result.hits {
+            println!("  [{}] {} — {}", hit.source, hit.title, hit.context);
+        }
+    }
+    Ok(())
+}
+
+fn run_build_index(source: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let metrics = store::build_substring_index(source)?;
+    println!("FM-index built:");
+    println!("  Documents: {}", metrics.documents);
+    println!(
+        "  Text: {} bytes → Index: {} bytes",
+        metrics.text_bytes, metrics.index_bytes
+    );
+    println!("  Time: {}ms", metrics.build_time_ms);
+    Ok(())
 }
 
 fn run_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {

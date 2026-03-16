@@ -1720,6 +1720,77 @@ pub fn enrich_source(
     Ok(count)
 }
 
+/// Substring search result.
+#[derive(Debug, Serialize)]
+pub struct SubstringResult {
+    pub pattern: String,
+    pub total_count: usize,
+    pub hits: Vec<lokb_search::substring::SubstringHit>,
+}
+
+/// Search for exact substring via FM-index.
+pub fn substring_search(pattern: &str, limit: usize) -> io::Result<SubstringResult> {
+    let fm_path = config::derived_dir().join("fmindex");
+    let index =
+        lokb_search::SubstringIndex::open(&fm_path).map_err(|e| io::Error::other(e.to_string()))?;
+
+    if !index.is_built() {
+        return Ok(SubstringResult {
+            pattern: pattern.to_string(),
+            total_count: 0,
+            hits: vec![],
+        });
+    }
+
+    let total_count = index.count(pattern);
+    let hits = index.search(pattern, limit);
+
+    Ok(SubstringResult {
+        pattern: pattern.to_string(),
+        total_count,
+        hits,
+    })
+}
+
+/// Build FM-index for a source (or all sources).
+pub fn build_substring_index(
+    source_filter: &str,
+) -> io::Result<lokb_search::substring::BuildMetrics> {
+    let content_store = open_content_store();
+    let catalog = open_catalog()?;
+    let sources = catalog
+        .list_sources()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let mut documents: Vec<(String, String, String)> = Vec::new();
+
+    for source in &sources {
+        if source_filter != "all" && source.name != source_filter {
+            continue;
+        }
+        let files = content_store
+            .list_files(&source.name)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        for (filename, text) in files {
+            let title = extract_doc_title(&text, &filename);
+            documents.push((source.name.clone(), title, text));
+        }
+    }
+
+    let fm_path = config::derived_dir().join("fmindex");
+    let mut index =
+        lokb_search::SubstringIndex::open(&fm_path).map_err(|e| io::Error::other(e.to_string()))?;
+
+    let doc_refs: Vec<(&str, &str, &str)> = documents
+        .iter()
+        .map(|(s, t, text)| (s.as_str(), t.as_str(), text.as_str()))
+        .collect();
+
+    index
+        .build(&doc_refs)
+        .map_err(|e| io::Error::other(e.to_string()))
+}
+
 /// Entity lookup result.
 #[derive(Debug, Serialize)]
 pub struct EntityCard {

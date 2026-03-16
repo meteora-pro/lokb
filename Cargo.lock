@@ -327,6 +327,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bit_field"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1184,6 +1193,17 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
+]
+
+[[package]]
+name = "fm-index"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29f414f92b6c5fbe90f2b2861482bfd75fd5452dcb80ca23d5f8fee05ad5bf15"
+dependencies = [
+ "num-traits",
+ "serde",
+ "vers-vecs",
 ]
 
 [[package]]
@@ -2279,10 +2299,13 @@ dependencies = [
 name = "lokb-search"
 version = "0.1.0"
 dependencies = [
+ "bincode",
+ "fm-index",
  "lokb-core",
  "serde",
  "serde_json",
  "tantivy",
+ "tempfile",
 ]
 
 [[package]]
@@ -4734,6 +4757,15 @@ name = "vcpkg"
 version = "0.2.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+
+[[package]]
+name = "vers-vecs"
+version = "1.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b66e46969ff15737f785d27c9a5a4b96ff3aa7913ec4f438f123533dc97cb54"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "version_check"
