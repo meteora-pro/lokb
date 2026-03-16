@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "lokb": {
+      "command": "lokb",
+      "args": ["serve", "--mcp"],
+      "env": {
+        "LOKB_DATA_DIR": "~/.local/share/lokb"
+      }
+    }
+  }
+}

@@ -1,11 +1,6 @@
-//! HTTP API server for lokb.
-//!
-//! Endpoints:
-//! - GET /api/search?q=...&limit=20
-//! - GET /api/sources
-//! - GET /api/entity/:name
-//! - GET /api/status
-//! - GET /api/read/:source/:doc_id
+//! HTTP API server and MCP server for lokb.
+
+pub mod mcp;
 
 use axum::{
     Router,

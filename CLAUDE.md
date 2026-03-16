@@ -69,24 +69,25 @@ RAW SOURCE → OPTIMIZED SOURCE → DERIVED → CACHE
 ### Реализованные CLI команды
 
 ```bash
-lokb source add <name> --raw <path> --format <fmt> --class <cls> [--output json]
+lokb source add <name> --raw <path> --format <fmt> --class <cls> [--output json] [--watch]
 lokb source update <name> --raw <path>
 lokb source status <name> [--format json]
 lokb source delete <name>
 lokb source list [--format json]
 lokb search <query> [--format json] [--mode quick|normal|deep] [--limit N] [--source <name>] [--personal-only] [--public-only]
-lokb read <source>:<doc_id> [--section <name>]
+lokb read <source>:<doc_id> [--section <name>] [--highlight <text>] [--plain]
 lokb entity <name> [--relations] [--documents] [--format json]
 lokb lookup "query"
-lokb enrich <source> --step summarize [--llm ollama:phi3]
-lokb serve [--port 7890]
+lokb enrich <source> --step <step> [--llm ollama:phi3] [--limit N]
+lokb serve [--port 7890] [--mcp]
 lokb storage status [--format json]
 lokb export <output> [--include-personal]
+lokb import <archive>
 ```
 
-Поддерживаемые форматы: `markdown-dir`, `plaintext-dir`, `html-dir`, `telegram-export`, `epub`, `pdf-dir`, `zim`, `wikidata-json`, `mbox`, `gpx`, `exif-dir`, `csv`, `tsv`
+Enrich steps: `summarize`, `image_describe`, `extract_entities`
 
-Поддерживаемые форматы: `markdown-dir`, `telegram-export`.
+Поддерживаемые форматы (15): `markdown-dir`, `plaintext-dir`, `html-dir`, `telegram-export`, `epub`, `pdf-dir`, `zim`, `wikidata-json`, `mbox`, `gpx`, `exif-dir`, `csv`, `tsv`, `chrome-history`, `firefox-history`
 
 ## Ключевые зависимости (planned)
 
