@@ -1941,26 +1941,107 @@ pub fn fact_lookup(query: &str) -> io::Result<Option<FactAnswer>> {
     Ok(None)
 }
 
-/// Export public sources.
+/// Export sources to tar.zst archive (#38).
 pub fn export(output: &str, include_personal: bool) -> io::Result<()> {
     let catalog = open_catalog()?;
+    let content_store = open_content_store();
     let sources = catalog
         .list_sources()
         .map_err(|e| io::Error::other(e.to_string()))?;
     let output_path = PathBuf::from(output);
 
-    let exported_sources: Vec<String> = sources
+    let exported_sources: Vec<&lokb_core::DataSource> = sources
         .iter()
         .filter(|s| include_personal || s.class.is_exportable())
-        .map(|s| s.name.clone())
         .collect();
 
-    let manifest = serde_json::json!({
-        "version": "0.1.0",
-        "sources": exported_sources,
-    });
-    let json = serde_json::to_string_pretty(&manifest).map_err(io::Error::other)?;
-    fs::write(output_path, json)?;
+    // Create tar.zst if filename ends with .zst or .tar.zst, otherwise JSON manifest
+    if output.ends_with(".tar.zst") || output.ends_with(".zst") {
+        let file = fs::File::create(&output_path)?;
+        let zstd_encoder = zstd::Encoder::new(file, 3)
+            .map_err(|e| io::Error::other(format!("zstd encoder: {e}")))?;
+        let mut tar_builder = tar::Builder::new(zstd_encoder);
+
+        // Add manifest
+        let manifest = serde_json::json!({
+            "version": "0.1.0",
+            "sources": exported_sources.iter().map(|s| &s.name).collect::<Vec<_>>(),
+        });
+        let manifest_bytes = serde_json::to_string_pretty(&manifest)
+            .map_err(io::Error::other)?
+            .into_bytes();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest_bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar_builder.append_data(&mut header, "manifest.json", &manifest_bytes[..])?;
+
+        // Add source content files
+        for source in &exported_sources {
+            let files = content_store
+                .list_files(&source.name)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            for (filename, content) in &files {
+                let path = format!("source/{}/{}", source.name, filename);
+                let bytes = content.as_bytes();
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                tar_builder.append_data(&mut header, &path, bytes)?;
+            }
+        }
+
+        let zstd_encoder = tar_builder.into_inner()?;
+        zstd_encoder
+            .finish()
+            .map_err(|e| io::Error::other(format!("zstd finish: {e}")))?;
+    } else {
+        // Legacy JSON manifest
+        let manifest = serde_json::json!({
+            "version": "0.1.0",
+            "sources": exported_sources.iter().map(|s| &s.name).collect::<Vec<_>>(),
+        });
+        let json = serde_json::to_string_pretty(&manifest).map_err(io::Error::other)?;
+        fs::write(output_path, json)?;
+    }
 
     Ok(())
 }
+
+/// Import from tar.zst archive (#38).
+pub fn import(input: &str) -> io::Result<u64> {
+    config::init_dirs()?;
+    let content_store = open_content_store();
+    let input_path = PathBuf::from(input);
+
+    let file = fs::File::open(&input_path)?;
+    let zstd_decoder =
+        zstd::Decoder::new(file).map_err(|e| io::Error::other(format!("zstd decoder: {e}")))?;
+    let mut archive = tar::Archive::new(zstd_decoder);
+
+    let mut count = 0u64;
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_string_lossy().to_string();
+
+        if path.starts_with("source/") {
+            // source/{name}/{filename}
+            let parts: Vec<&str> = path.splitn(3, '/').collect();
+            if parts.len() == 3 {
+                let source_name = parts[1];
+                let filename = parts[2];
+                let mut content = String::new();
+                entry.read_to_string(&mut content)?;
+                content_store
+                    .write_file(source_name, filename, &content)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                count += 1;
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+use std::io::Read as StdRead;

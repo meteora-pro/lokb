@@ -97,13 +97,18 @@ enum Commands {
         #[arg(long)]
         mcp: bool,
     },
-    /// Export knowledge base
+    /// Export knowledge base (use .tar.zst for compressed archive)
     Export {
         /// Output file path
         output: String,
         /// Include personal data
         #[arg(long)]
         include_personal: bool,
+    },
+    /// Import from tar.zst archive
+    Import {
+        /// Input archive path
+        input: String,
     },
 }
 
@@ -213,6 +218,7 @@ fn main() {
             output,
             include_personal,
         } => run_export(&output, include_personal),
+        Commands::Import { input } => run_import(&input),
     };
 
     if let Err(e) = result {
@@ -517,5 +523,11 @@ fn run_entity(
 fn run_export(output: &str, include_personal: bool) -> Result<(), Box<dyn std::error::Error>> {
     store::export(output, include_personal)?;
     println!("Exported to {output}");
+    Ok(())
+}
+
+fn run_import(input: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let count = store::import(input)?;
+    println!("Imported {count} files from {input}");
     Ok(())
 }
