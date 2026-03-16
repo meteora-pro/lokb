@@ -196,7 +196,14 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
         .map_err(|e| io::Error::other(e.to_string()))? as u64;
     let enrichment_time = enrichment_start.elapsed();
 
-    // Phase 3: Optional embedding (background in future, inline for now)
+    // Phase 3: Entity extraction from [[wikilinks]] (ADR-007 Pattern 1)
+    let entities_extracted = extract_entities_from_files(&files, source_id, &catalog);
+
+    if entities_extracted > 0 {
+        eprintln!("  Entities: {entities_extracted} extracted from wikilinks");
+    }
+
+    // Phase 4: Optional embedding (background in future, inline for now)
     let embed_start = std::time::Instant::now();
     let vectors_created = match embed_chunks(name, &files, format, class, &chunker) {
         Ok(count) => count,
@@ -589,6 +596,11 @@ fn ingest_raw(
         "epub" => ingest_epub(raw_path, source_name, content_store, source_id, catalog),
         "pdf-dir" => ingest_pdf_dir(raw_path, source_name, content_store, source_id, catalog),
         "zim" => ingest_zim(raw_path, source_name, content_store, source_id, catalog),
+        "wikidata-json" => ingest_wikidata(raw_path, source_id, catalog),
+        "mbox" => ingest_mbox(raw_path, source_name, content_store, source_id, catalog),
+        "gpx" => ingest_gpx(raw_path, source_name, content_store, source_id, catalog),
+        "exif-dir" => ingest_exif_dir(raw_path, source_name, content_store, source_id, catalog),
+        "csv" | "tsv" => ingest_csv(raw_path, source_name, content_store, source_id, catalog),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -777,6 +789,147 @@ fn sanitize_filename(name: &str) -> String {
     name.replace(['/', '\\', ':'], "_")
 }
 
+/// Parse CSV/TSV data file.
+fn ingest_csv(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
+    let (doc, text) = lokb_parsers::csv_data::parse_csv(raw_path, source_id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let filename = format!("{}.md", doc.external_id);
+    content_store
+        .write_file(source_name, &filename, &text)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    catalog
+        .upsert_document(&doc)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    Ok(1)
+}
+
+/// Parse GPX track file.
+fn ingest_gpx(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
+    let segments = lokb_parsers::gpx::parse_gpx(raw_path, source_id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let mut count = 0;
+    for (doc, text) in &segments {
+        if text.is_empty() {
+            continue;
+        }
+        let filename = format!("{}.md", doc.external_id);
+        content_store
+            .write_file(source_name, &filename, text)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        catalog
+            .upsert_document(doc)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// Extract EXIF metadata from photos in a directory.
+fn ingest_exif_dir(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
+    let mut count = 0;
+    for entry in fs::read_dir(raw_path)? {
+        let entry = entry?;
+        let path = entry.path();
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+
+        if !["jpg", "jpeg", "tiff", "tif"].contains(&ext.as_str()) {
+            continue;
+        }
+
+        let filename = path.file_name().unwrap().to_string_lossy().to_string();
+        let external_id = filename.clone();
+
+        match lokb_parsers::exif::extract_exif(&path, source_id, &external_id) {
+            Ok((doc, text)) => {
+                let md_filename = format!("{external_id}.md");
+                content_store
+                    .write_file(source_name, &md_filename, &text)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                catalog
+                    .upsert_document(&doc)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                count += 1;
+            }
+            Err(e) => {
+                eprintln!("Warning: skipping {filename}: {e}");
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// Parse MBOX email archive with threading.
+fn ingest_mbox(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> io::Result<u64> {
+    let threads = lokb_parsers::mbox::parse_mbox(raw_path, source_id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Extract contacts as Person entities
+    let contacts = lokb_parsers::mbox::extract_contacts(&threads);
+    for contact in &contacts {
+        let entity_id = format!(
+            "person:{}",
+            contact
+                .to_lowercase()
+                .replace(' ', "_")
+                .replace(['<', '>', '@'], "_")
+        );
+        let _ = catalog.upsert_entity(
+            &entity_id,
+            contact,
+            None,
+            &["Person".to_string()],
+            &std::collections::HashMap::new(),
+        );
+    }
+    if !contacts.is_empty() {
+        eprintln!("  Contacts: {} people extracted from email", contacts.len());
+    }
+
+    let mut count = 0;
+    for (doc, text) in &threads {
+        if text.is_empty() {
+            continue;
+        }
+        let filename = format!("{}.md", doc.external_id);
+        content_store
+            .write_file(source_name, &filename, text)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        catalog
+            .upsert_document(doc)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 fn ingest_epub(
     raw_path: &Path,
     source_name: &str,
@@ -848,6 +1001,9 @@ fn ingest_telegram(
         segments.push(current_segment);
     }
 
+    // Collect unique contacts for entity extraction
+    let mut contacts: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     let mut count = 0;
     for (i, segment) in segments.iter().enumerate() {
         let mut text = format!("[{}]\n", chat_name);
@@ -855,7 +1011,22 @@ fn ingest_telegram(
             let from = msg.from.as_deref().unwrap_or("Unknown");
             let time = msg.date.split('T').next_back().unwrap_or(&msg.date);
             let msg_text = extract_text(&msg.text);
-            text.push_str(&format!("{} [{}]: {}\n", from, time, msg_text));
+
+            // Track contacts
+            if let Some(ref name) = msg.from {
+                contacts.insert(name.clone());
+            }
+
+            // Format with reply/edited indicators
+            let mut line = format!("{from} [{time}]");
+            if msg.reply_to_message_id.is_some() {
+                line.push_str(" (reply)");
+            }
+            if msg.edited.is_some() {
+                line.push_str(" (edited)");
+            }
+            line.push_str(&format!(": {msg_text}\n"));
+            text.push_str(&line);
         }
         let filename = format!("segment_{:04}.txt", i);
         let external_id = format!("segment_{:04}", i);
@@ -884,6 +1055,24 @@ fn ingest_telegram(
             .map_err(|e| io::Error::other(e.to_string()))?;
 
         count += 1;
+    }
+
+    // Extract Person entities from contacts (ADR-007 Pattern 1)
+    for contact_name in &contacts {
+        let entity_id = format!("person:{}", contact_name.to_lowercase().replace(' ', "_"));
+        let _ = catalog.upsert_entity(
+            &entity_id,
+            contact_name,
+            None,
+            &["Person".to_string()],
+            &std::collections::HashMap::new(),
+        );
+    }
+    if !contacts.is_empty() {
+        eprintln!(
+            "  Contacts: {} people extracted from Telegram",
+            contacts.len()
+        );
     }
 
     Ok(count)
@@ -943,10 +1132,14 @@ struct TelegramExport {
 
 #[derive(Deserialize)]
 struct TelegramMessage {
+    #[allow(dead_code)]
+    id: Option<i64>,
     r#type: String,
     date: String,
     from: Option<String>,
     text: serde_json::Value,
+    reply_to_message_id: Option<i64>,
+    edited: Option<String>,
 }
 
 /// Detailed status of a single source.
@@ -1247,6 +1440,8 @@ pub struct FullStorageStatus {
     pub layers: Vec<StorageLayerInfo>,
     pub total_bytes: u64,
     pub sources: Vec<SourceStorageInfo>,
+    pub entity_count: u64,
+    pub relation_count: u64,
 }
 
 /// Calculate storage status with per-source breakdown.
@@ -1287,10 +1482,19 @@ pub fn storage_status() -> io::Result<FullStorageStatus> {
         })
         .collect();
 
+    let entity_count = catalog
+        .entity_count()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let relation_count = catalog
+        .relation_count()
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
     Ok(FullStorageStatus {
         layers,
         total_bytes,
         sources,
+        entity_count,
+        relation_count,
     })
 }
 
@@ -1313,6 +1517,363 @@ fn dir_size(path: &Path) -> u64 {
                 .sum()
         })
         .unwrap_or(0)
+}
+
+/// Ingest Wikidata JSON dump into entity store.
+fn ingest_wikidata(raw_path: &Path, source_id: Uuid, catalog: &SqliteCatalog) -> io::Result<u64> {
+    let file = fs::File::open(raw_path)?;
+    let reader: Box<dyn std::io::Read> = if raw_path.extension().is_some_and(|ext| ext == "gz") {
+        Box::new(flate2::read::GzDecoder::new(file))
+    } else {
+        Box::new(file)
+    };
+
+    let config = lokb_parsers::wikidata::WikidataConfig::default();
+    let mut count = 0u64;
+
+    lokb_parsers::wikidata::parse_wikidata(reader, &config, |entity| {
+        let en_label = entity.labels.get("en").cloned().unwrap_or_default();
+        let entity_id = format!("wikidata:{}", entity.qid);
+
+        let mut external_ids = std::collections::HashMap::new();
+        external_ids.insert("wikidata".to_string(), entity.qid.clone());
+
+        let entity_types: Vec<String> = entity.entity_type.iter().cloned().collect();
+
+        let _ = catalog.upsert_entity(
+            &entity_id,
+            &en_label,
+            entity.description.as_deref(),
+            &entity_types,
+            &external_ids,
+        );
+
+        // Add relations from properties
+        for prop in &entity.properties {
+            if let lokb_parsers::wikidata::WikidataValue::EntityRef(ref target_qid) = prop.value {
+                let target_id = format!("wikidata:{target_qid}");
+                let _ = catalog.add_relation(
+                    &entity_id,
+                    prop.property_label,
+                    &target_id,
+                    source_id,
+                    1.0,
+                );
+            }
+        }
+
+        count += 1;
+    })
+    .map_err(|e| io::Error::other(e.to_string()))?;
+
+    Ok(count)
+}
+
+/// Extract entities from [[wikilinks]] in markdown files.
+/// Creates entities, records document mentions, and builds co-occurrence relations.
+fn extract_entities_from_files(
+    files: &[(String, String)],
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+) -> u64 {
+    let mut total = 0u64;
+
+    for (filename, content) in files {
+        let wikilinks = lokb_parsers::extract_wikilinks(content);
+        if wikilinks.is_empty() {
+            continue;
+        }
+
+        // Find document_id for this file
+        let external_id = filename.trim_end_matches(".md").trim_end_matches(".txt");
+        let doc_id = catalog
+            .get_document_by_external_id(source_id, external_id)
+            .ok()
+            .flatten();
+
+        let mut doc_entity_ids: Vec<String> = Vec::new();
+
+        for entity_name in wikilinks.keys() {
+            let entity_id = format!("wiki:{}", entity_name.to_lowercase().replace(' ', "_"));
+            let _ = catalog.upsert_entity(
+                &entity_id,
+                entity_name,
+                None,
+                &[],
+                &std::collections::HashMap::new(),
+            );
+
+            // Record mention in document
+            if let Some(did) = doc_id {
+                let _ = catalog.add_entity_mention(&entity_id, did, source_id, Some(entity_name));
+            }
+
+            doc_entity_ids.push(entity_id);
+            total += 1;
+        }
+
+        // Build co-occurrence relations between entities in same document
+        for i in 0..doc_entity_ids.len() {
+            for j in (i + 1)..doc_entity_ids.len() {
+                let _ = catalog.add_relation(
+                    &doc_entity_ids[i],
+                    "co_occurs_with",
+                    &doc_entity_ids[j],
+                    source_id,
+                    1.0,
+                );
+            }
+        }
+    }
+    total
+}
+
+/// Run LLM enrichment on existing source documents.
+pub fn enrich_source(
+    source_name: &str,
+    step: &str,
+    llm_spec: &str,
+    limit: usize,
+) -> io::Result<u64> {
+    let catalog = open_catalog()?;
+    let content_store = open_content_store();
+    let fts = open_fts()?;
+    let chunker = SemanticChunker::default();
+
+    let source = catalog
+        .get_source(source_name)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("source '{source_name}' not found"),
+            )
+        })?;
+
+    let backend =
+        lokb_llm::create_backend(llm_spec).map_err(|e| io::Error::other(e.to_string()))?;
+
+    let files = content_store
+        .list_files(source_name)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let max = if limit > 0 { limit } else { files.len() };
+    let mut count = 0u64;
+
+    for (filename, content) in files.iter().take(max) {
+        match step {
+            "summarize" => {
+                let prompt = format!(
+                    "Summarize the following text in 2-3 sentences:\n\n{}",
+                    &content[..content.len().min(2000)]
+                );
+                match backend.generate(&prompt, &lokb_llm::LlmOptions::default()) {
+                    Ok(summary) if !summary.is_empty() => {
+                        // Append summary to document and re-index
+                        let enriched = format!("{content}\n\n## Summary\n\n{summary}");
+                        content_store
+                            .write_file(source_name, filename, &enriched)
+                            .map_err(|e| io::Error::other(e.to_string()))?;
+
+                        let title = extract_doc_title(&enriched, filename);
+                        let doc = lokb_core::Document {
+                            id: Uuid::now_v7(),
+                            source_id: source.id,
+                            external_id: filename
+                                .trim_end_matches(".md")
+                                .trim_end_matches(".txt")
+                                .to_string(),
+                            parent_id: None,
+                            depth: 0,
+                            title: title.clone(),
+                            content_type: ContentType::Article,
+                            language: None,
+                            content_hash: ContentHash::from_bytes(enriched.as_bytes()),
+                            content_size: enriched.len() as u64,
+                            created_at: Utc::now(),
+                            indexed_at: Utc::now(),
+                            privacy_level: PrivacyLevel::default(),
+                        };
+                        let chunks = chunker
+                            .chunk(&doc, &enriched)
+                            .map_err(|e| io::Error::other(e.to_string()))?;
+                        let _ = fts.index_chunks(&chunks, source_name, &title);
+
+                        eprintln!("  Summarized: {filename}");
+                        count += 1;
+                    }
+                    Ok(_) => {} // empty response, skip
+                    Err(e) => {
+                        eprintln!("  Warning: LLM failed for {filename}: {e}");
+                    }
+                }
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown enrichment step: {step}. Available: summarize"),
+                ));
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+/// Entity lookup result.
+#[derive(Debug, Serialize)]
+pub struct EntityCard {
+    pub canonical_name: String,
+    pub description: Option<String>,
+    pub entity_types: Vec<String>,
+    pub mention_count: i64,
+    pub relations: Vec<lokb_storage::catalog::RelationInfo>,
+    pub documents: Vec<String>,
+}
+
+/// Look up an entity by name.
+pub fn entity_lookup(
+    name: &str,
+    include_relations: bool,
+    include_documents: bool,
+) -> io::Result<Option<EntityCard>> {
+    let catalog = open_catalog()?;
+    let entity = catalog
+        .get_entity_by_name(name)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    match entity {
+        None => Ok(None),
+        Some(info) => {
+            let relations = if include_relations {
+                catalog
+                    .get_relations(&info.id)
+                    .map_err(|e| io::Error::other(e.to_string()))?
+            } else {
+                vec![]
+            };
+
+            let documents = if include_documents {
+                catalog
+                    .get_entity_documents(&info.id)
+                    .map_err(|e| io::Error::other(e.to_string()))?
+            } else {
+                vec![]
+            };
+
+            let entity_types: Vec<String> =
+                serde_json::from_str(&info.entity_types).unwrap_or_default();
+
+            Ok(Some(EntityCard {
+                canonical_name: info.canonical_name,
+                description: info.description,
+                entity_types,
+                mention_count: info.mention_count,
+                relations,
+                documents,
+            }))
+        }
+    }
+}
+
+/// Search entities by prefix.
+pub fn entity_search(
+    query: &str,
+    limit: usize,
+) -> io::Result<Vec<lokb_storage::catalog::EntityInfo>> {
+    let catalog = open_catalog()?;
+    catalog
+        .search_entities(query, limit)
+        .map_err(|e| io::Error::other(e.to_string()))
+}
+
+/// Result of a structured fact lookup.
+#[derive(Debug, Serialize)]
+pub struct FactAnswer {
+    pub answer: String,
+    pub entity: Option<String>,
+    pub property: Option<String>,
+    pub source: Option<String>,
+}
+
+/// Try to answer a fact query from the knowledge graph.
+/// Parses patterns like "population of Paris", "capital of France".
+pub fn fact_lookup(query: &str) -> io::Result<Option<FactAnswer>> {
+    let catalog = open_catalog()?;
+    let query_lower = query.to_lowercase();
+
+    // Try to extract entity name from query
+    // Patterns: "X of Y", "Y X", "what is Y"
+    let entity_name = if let Some(pos) = query_lower.find(" of ") {
+        Some(query[pos + 4..].trim().to_string())
+    } else {
+        // Try last word(s) as entity name
+        let words: Vec<&str> = query.split_whitespace().collect();
+        if words.len() >= 2 {
+            Some(words[1..].join(" "))
+        } else {
+            None
+        }
+    };
+
+    let entity_name = match entity_name {
+        Some(n) => n,
+        None => return Ok(None),
+    };
+
+    // Look up entity
+    let entity = catalog
+        .get_entity_by_name(&entity_name)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let entity = match entity {
+        Some(e) => e,
+        None => return Ok(None),
+    };
+
+    // Get relations and try to match query pattern
+    let relations = catalog
+        .get_relations(&entity.id)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Extract property hint from query
+    let property_hint = if let Some(pos) = query_lower.find(" of ") {
+        query_lower[..pos].trim().to_string()
+    } else {
+        query_lower
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    };
+
+    // Try to find matching relation
+    for rel in &relations {
+        let pred_lower = rel.predicate.to_lowercase();
+        if pred_lower.contains(&property_hint) || property_hint.contains(&pred_lower) {
+            return Ok(Some(FactAnswer {
+                answer: format!(
+                    "{}: {} → {}",
+                    entity.canonical_name, rel.predicate, rel.target_name
+                ),
+                entity: Some(entity.canonical_name.clone()),
+                property: Some(rel.predicate.clone()),
+                source: Some("knowledge_graph".to_string()),
+            }));
+        }
+    }
+
+    // If entity found but no matching relation, return entity description
+    if let Some(ref desc) = entity.description {
+        return Ok(Some(FactAnswer {
+            answer: format!("{}: {}", entity.canonical_name, desc),
+            entity: Some(entity.canonical_name),
+            property: None,
+            source: Some("knowledge_graph".to_string()),
+        }));
+    }
+
+    Ok(None)
 }
 
 /// Export public sources.

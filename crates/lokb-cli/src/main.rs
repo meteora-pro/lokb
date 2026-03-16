@@ -52,6 +52,48 @@ enum Commands {
         #[command(subcommand)]
         command: StorageCommands,
     },
+    /// Quick fact lookup (entity + relations, falls back to search)
+    Lookup {
+        /// Query (e.g. "population of Paris", "capital of France")
+        query: String,
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Enrich existing source with LLM (summarize, etc.)
+    Enrich {
+        /// Source name
+        source: String,
+        /// Enrichment step to run
+        #[arg(long, default_value = "summarize")]
+        step: String,
+        /// LLM backend spec (skip, ollama:model, openai:url:model)
+        #[arg(long, default_value = "ollama:phi3")]
+        llm: String,
+        /// Max documents to process (0 = all)
+        #[arg(long, default_value = "0")]
+        limit: usize,
+    },
+    /// Look up an entity in the knowledge graph
+    Entity {
+        /// Entity name
+        name: String,
+        /// Show relations
+        #[arg(long)]
+        relations: bool,
+        /// Show documents mentioning this entity
+        #[arg(long)]
+        documents: bool,
+        /// Output format
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Start HTTP API server
+    Serve {
+        /// Port number
+        #[arg(long, default_value = "7890")]
+        port: u16,
+    },
     /// Export knowledge base
     Export {
         /// Output file path
@@ -144,6 +186,20 @@ fn main() {
         ),
         Commands::Read { doc_ref, section } => run_read(&doc_ref, section.as_deref()),
         Commands::Storage { command } => run_storage(command),
+        Commands::Enrich {
+            source,
+            step,
+            llm,
+            limit,
+        } => run_enrich(&source, &step, &llm, limit),
+        Commands::Lookup { query, format } => run_lookup(&query, &format),
+        Commands::Entity {
+            name,
+            relations,
+            documents,
+            format,
+        } => run_entity(&name, relations, documents, &format),
+        Commands::Serve { port } => run_serve(port),
         Commands::Export {
             output,
             include_personal,
@@ -325,6 +381,11 @@ fn run_storage(command: StorageCommands) -> Result<(), Box<dyn std::error::Error
                         );
                     }
                 }
+                if status.entity_count > 0 || status.relation_count > 0 {
+                    println!("\nKNOWLEDGE GRAPH");
+                    println!("  Entities:  {}", status.entity_count);
+                    println!("  Relations: {}", status.relation_count);
+                }
             }
         }
     }
@@ -341,6 +402,102 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     }
+}
+
+fn run_serve(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(lokb_serve::serve(port))?;
+    Ok(())
+}
+
+fn run_enrich(
+    source: &str,
+    step: &str,
+    llm_spec: &str,
+    limit: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let count = store::enrich_source(source, step, llm_spec, limit)?;
+    println!("Enriched {count} documents with step '{step}'");
+    Ok(())
+}
+
+fn run_lookup(query: &str, format: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let result = store::fact_lookup(query)?;
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else if let Some(answer) = result {
+        println!("{}", answer.answer);
+        if let Some(entity) = &answer.entity {
+            println!("  Entity: {entity}");
+        }
+        if let Some(source) = &answer.source {
+            println!("  Source: {source}");
+        }
+    } else {
+        // Fallback to search
+        let results = store::search(query, 3, None, false, false)?;
+        if results.is_empty() {
+            println!("No answer found for: {query}");
+        } else {
+            println!("No structured answer. Top search results:");
+            for r in &results {
+                println!("  [{}] {}", r.source, r.snippet);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_entity(
+    name: &str,
+    show_relations: bool,
+    show_documents: bool,
+    format: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = store::entity_lookup(name, show_relations, show_documents)?;
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        match result {
+            Some(entity) => {
+                println!("Entity: {}", entity.canonical_name);
+                if let Some(desc) = &entity.description {
+                    println!("  {desc}");
+                }
+                println!("  Mentions: {}", entity.mention_count);
+                if !entity.relations.is_empty() {
+                    println!("\n  Relations:");
+                    for rel in &entity.relations {
+                        println!(
+                            "    {} → {} ({:.0}%)",
+                            rel.predicate,
+                            rel.target_name,
+                            rel.confidence * 100.0
+                        );
+                    }
+                }
+                if !entity.documents.is_empty() {
+                    println!("\n  Documents:");
+                    for doc in &entity.documents {
+                        println!("    - {doc}");
+                    }
+                }
+            }
+            None => {
+                // Try fuzzy search
+                let suggestions = store::entity_search(name, 5)?;
+                if suggestions.is_empty() {
+                    println!("Entity '{name}' not found.");
+                } else {
+                    println!("Entity '{name}' not found. Did you mean:");
+                    for s in &suggestions {
+                        println!("  - {} ({} mentions)", s.canonical_name, s.mention_count);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn run_export(output: &str, include_personal: bool) -> Result<(), Box<dyn std::error::Error>> {

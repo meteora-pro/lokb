@@ -11,6 +11,10 @@ lokb-pipeline = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+mail-parser = { workspace = true }
+kamadak-exif = { workspace = true }
 htmd = { workspace = true }
 zip = { workspace = true }
 quick-xml = { workspace = true }
