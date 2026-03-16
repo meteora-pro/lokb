@@ -71,7 +71,13 @@ pub struct IngestMetrics {
 }
 
 /// Save source config and ingest raw data. Returns metrics.
-pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Result<IngestMetrics> {
+pub fn add_source(
+    name: &str,
+    raw: &str,
+    format: &str,
+    class: &str,
+    no_embed: bool,
+) -> io::Result<IngestMetrics> {
     use std::time::Instant;
     let total_start = Instant::now();
 
@@ -203,13 +209,39 @@ pub fn add_source(name: &str, raw: &str, format: &str, class: &str) -> io::Resul
         eprintln!("  Entities: {entities_extracted} extracted from wikilinks");
     }
 
-    // Phase 4: Optional embedding (background in future, inline for now)
+    // Phase 4: FM-index (substring search, ADR-008)
+    let fm_path = config::derived_dir().join("fmindex");
+    let fm_index =
+        lokb_search::SubstringIndex::open(&fm_path).map_err(|e| io::Error::other(e.to_string()))?;
+    let fm_titles: Vec<String> = files.iter().map(|(f, t)| extract_doc_title(t, f)).collect();
+    let fm_docs: Vec<(&str, &str, &str)> = files
+        .iter()
+        .zip(fm_titles.iter())
+        .map(|((_, text), title)| (name, title.as_str(), text.as_str()))
+        .collect();
+    match fm_index.build(&fm_docs) {
+        Ok(m) => {
+            if m.documents > 0 {
+                eprintln!(
+                    "  FM-index: {}ms ({} docs, {} bytes)",
+                    m.build_time_ms, m.documents, m.index_bytes
+                );
+            }
+        }
+        Err(e) => eprintln!("  FM-index skipped: {e}"),
+    }
+
+    // Phase 5: Optional embedding (skip with --no-embed for large datasets)
     let embed_start = std::time::Instant::now();
-    let vectors_created = match embed_chunks(name, &files, format, class, &chunker) {
-        Ok(count) => count,
-        Err(e) => {
-            eprintln!("Warning: embedding skipped: {e}");
-            0
+    let vectors_created = if no_embed {
+        0
+    } else {
+        match embed_chunks(name, &files, format, class, &chunker) {
+            Ok(count) => count,
+            Err(e) => {
+                eprintln!("Warning: embedding skipped: {e}");
+                0
+            }
         }
     };
     let embed_time = embed_start.elapsed();
@@ -1742,8 +1774,12 @@ pub fn substring_search(pattern: &str, limit: usize) -> io::Result<SubstringResu
         });
     }
 
-    let total_count = index.count(pattern);
-    let hits = index.search(pattern, limit);
+    let total_count = index
+        .count(pattern)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let hits = index
+        .search(pattern, limit)
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
     Ok(SubstringResult {
         pattern: pattern.to_string(),
@@ -1778,7 +1814,7 @@ pub fn build_substring_index(
     }
 
     let fm_path = config::derived_dir().join("fmindex");
-    let mut index =
+    let index =
         lokb_search::SubstringIndex::open(&fm_path).map_err(|e| io::Error::other(e.to_string()))?;
 
     let doc_refs: Vec<(&str, &str, &str)> = documents
