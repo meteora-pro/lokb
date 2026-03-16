@@ -601,6 +601,22 @@ fn ingest_raw(
         "gpx" => ingest_gpx(raw_path, source_name, content_store, source_id, catalog),
         "exif-dir" => ingest_exif_dir(raw_path, source_name, content_store, source_id, catalog),
         "csv" | "tsv" => ingest_csv(raw_path, source_name, content_store, source_id, catalog),
+        "chrome-history" => ingest_browser(
+            raw_path,
+            source_name,
+            content_store,
+            source_id,
+            catalog,
+            true,
+        ),
+        "firefox-history" => ingest_browser(
+            raw_path,
+            source_name,
+            content_store,
+            source_id,
+            catalog,
+            false,
+        ),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -787,6 +803,55 @@ fn ingest_zim(
 /// Sanitize filename for content store (replace path separators).
 fn sanitize_filename(name: &str) -> String {
     name.replace(['/', '\\', ':'], "_")
+}
+
+/// Parse browser history (Chrome or Firefox SQLite).
+#[allow(clippy::too_many_arguments)]
+fn ingest_browser(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+    is_chrome: bool,
+) -> io::Result<u64> {
+    let docs = if is_chrome {
+        lokb_parsers::browser::parse_chrome_history(raw_path, source_id)
+    } else {
+        lokb_parsers::browser::parse_firefox_history(raw_path, source_id)
+    }
+    .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Extract URL entities
+    let url_entities = lokb_parsers::browser::extract_url_entities(&docs);
+    for (entity_id, entity_name) in &url_entities {
+        let _ = catalog.upsert_entity(
+            entity_id,
+            entity_name,
+            None,
+            &[],
+            &std::collections::HashMap::new(),
+        );
+    }
+    if !url_entities.is_empty() {
+        eprintln!(
+            "  URL entities: {} extracted from browser history",
+            url_entities.len()
+        );
+    }
+
+    let mut count = 0;
+    for (doc, text) in &docs {
+        let filename = format!("{}.md", doc.external_id);
+        content_store
+            .write_file(source_name, &filename, text)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        catalog
+            .upsert_document(doc)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// Parse CSV/TSV data file.

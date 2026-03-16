@@ -2250,6 +2250,7 @@ dependencies = [
  "memmap2",
  "pdf-extract",
  "quick-xml",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
