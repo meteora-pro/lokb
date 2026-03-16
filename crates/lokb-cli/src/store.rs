@@ -633,6 +633,22 @@ fn ingest_raw(
         "gpx" => ingest_gpx(raw_path, source_name, content_store, source_id, catalog),
         "exif-dir" => ingest_exif_dir(raw_path, source_name, content_store, source_id, catalog),
         "csv" | "tsv" => ingest_csv(raw_path, source_name, content_store, source_id, catalog),
+        "chrome-history" => ingest_browser(
+            raw_path,
+            source_name,
+            content_store,
+            source_id,
+            catalog,
+            true,
+        ),
+        "firefox-history" => ingest_browser(
+            raw_path,
+            source_name,
+            content_store,
+            source_id,
+            catalog,
+            false,
+        ),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported format: {}", format),
@@ -819,6 +835,55 @@ fn ingest_zim(
 /// Sanitize filename for content store (replace path separators).
 fn sanitize_filename(name: &str) -> String {
     name.replace(['/', '\\', ':'], "_")
+}
+
+/// Parse browser history (Chrome or Firefox SQLite).
+#[allow(clippy::too_many_arguments)]
+fn ingest_browser(
+    raw_path: &Path,
+    source_name: &str,
+    content_store: &FileContentStore,
+    source_id: Uuid,
+    catalog: &SqliteCatalog,
+    is_chrome: bool,
+) -> io::Result<u64> {
+    let docs = if is_chrome {
+        lokb_parsers::browser::parse_chrome_history(raw_path, source_id)
+    } else {
+        lokb_parsers::browser::parse_firefox_history(raw_path, source_id)
+    }
+    .map_err(|e| io::Error::other(e.to_string()))?;
+
+    // Extract URL entities
+    let url_entities = lokb_parsers::browser::extract_url_entities(&docs);
+    for (entity_id, entity_name) in &url_entities {
+        let _ = catalog.upsert_entity(
+            entity_id,
+            entity_name,
+            None,
+            &[],
+            &std::collections::HashMap::new(),
+        );
+    }
+    if !url_entities.is_empty() {
+        eprintln!(
+            "  URL entities: {} extracted from browser history",
+            url_entities.len()
+        );
+    }
+
+    let mut count = 0;
+    for (doc, text) in &docs {
+        let filename = format!("{}.md", doc.external_id);
+        content_store
+            .write_file(source_name, &filename, text)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        catalog
+            .upsert_document(doc)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        count += 1;
+    }
+    Ok(count)
 }
 
 /// Parse CSV/TSV data file.
@@ -1740,10 +1805,60 @@ pub fn enrich_source(
                     }
                 }
             }
+            "image_describe" => {
+                // Describe image via vision LLM (requires multimodal model)
+                let prompt = format!(
+                    "Describe this photo metadata in one sentence:\n\n{}",
+                    &content[..content.len().min(500)]
+                );
+                match backend.generate(&prompt, &lokb_llm::LlmOptions::default()) {
+                    Ok(description) if !description.is_empty() => {
+                        let enriched = format!("{content}\n\n## Description\n\n{description}");
+                        content_store
+                            .write_file(source_name, filename, &enriched)
+                            .map_err(|e| io::Error::other(e.to_string()))?;
+                        eprintln!("  Described: {filename}");
+                        count += 1;
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("  Warning: LLM failed for {filename}: {e}"),
+                }
+            }
+            "extract_entities" => {
+                // NER via LLM (fallback for sources without structured entity extraction)
+                let prompt = format!(
+                    "List the named entities (people, places, organizations) in this text, one per line:\n\n{}",
+                    &content[..content.len().min(2000)]
+                );
+                match backend.generate(&prompt, &lokb_llm::LlmOptions::default()) {
+                    Ok(entities_text) if !entities_text.is_empty() => {
+                        for line in entities_text.lines() {
+                            let entity_name = line.trim().trim_start_matches("- ");
+                            if !entity_name.is_empty() && entity_name.len() < 100 {
+                                let entity_id =
+                                    format!("ner:{}", entity_name.to_lowercase().replace(' ', "_"));
+                                let _ = catalog.upsert_entity(
+                                    &entity_id,
+                                    entity_name,
+                                    None,
+                                    &[],
+                                    &std::collections::HashMap::new(),
+                                );
+                            }
+                        }
+                        eprintln!("  NER: {filename}");
+                        count += 1;
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("  Warning: LLM failed for {filename}: {e}"),
+                }
+            }
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("unknown enrichment step: {step}. Available: summarize"),
+                    format!(
+                        "unknown enrichment step: {step}. Available: summarize, image_describe, extract_entities"
+                    ),
                 ));
             }
         }
@@ -1983,26 +2098,172 @@ pub fn fact_lookup(query: &str) -> io::Result<Option<FactAnswer>> {
     Ok(None)
 }
 
-/// Export public sources.
+/// Export sources to tar.zst archive (#38).
 pub fn export(output: &str, include_personal: bool) -> io::Result<()> {
     let catalog = open_catalog()?;
+    let content_store = open_content_store();
     let sources = catalog
         .list_sources()
         .map_err(|e| io::Error::other(e.to_string()))?;
     let output_path = PathBuf::from(output);
 
-    let exported_sources: Vec<String> = sources
+    let exported_sources: Vec<&lokb_core::DataSource> = sources
         .iter()
         .filter(|s| include_personal || s.class.is_exportable())
-        .map(|s| s.name.clone())
         .collect();
 
-    let manifest = serde_json::json!({
-        "version": "0.1.0",
-        "sources": exported_sources,
-    });
-    let json = serde_json::to_string_pretty(&manifest).map_err(io::Error::other)?;
-    fs::write(output_path, json)?;
+    // Create tar.zst if filename ends with .zst or .tar.zst, otherwise JSON manifest
+    if output.ends_with(".tar.zst") || output.ends_with(".zst") {
+        let file = fs::File::create(&output_path)?;
+        let zstd_encoder = zstd::Encoder::new(file, 3)
+            .map_err(|e| io::Error::other(format!("zstd encoder: {e}")))?;
+        let mut tar_builder = tar::Builder::new(zstd_encoder);
+
+        // Add manifest
+        let manifest = serde_json::json!({
+            "version": "0.1.0",
+            "sources": exported_sources.iter().map(|s| &s.name).collect::<Vec<_>>(),
+        });
+        let manifest_bytes = serde_json::to_string_pretty(&manifest)
+            .map_err(io::Error::other)?
+            .into_bytes();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest_bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar_builder.append_data(&mut header, "manifest.json", &manifest_bytes[..])?;
+
+        // Add source content files
+        for source in &exported_sources {
+            let files = content_store
+                .list_files(&source.name)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            for (filename, content) in &files {
+                let path = format!("source/{}/{}", source.name, filename);
+                let bytes = content.as_bytes();
+                let mut header = tar::Header::new_gnu();
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                tar_builder.append_data(&mut header, &path, bytes)?;
+            }
+        }
+
+        let zstd_encoder = tar_builder.into_inner()?;
+        zstd_encoder
+            .finish()
+            .map_err(|e| io::Error::other(format!("zstd finish: {e}")))?;
+    } else {
+        // Legacy JSON manifest
+        let manifest = serde_json::json!({
+            "version": "0.1.0",
+            "sources": exported_sources.iter().map(|s| &s.name).collect::<Vec<_>>(),
+        });
+        let json = serde_json::to_string_pretty(&manifest).map_err(io::Error::other)?;
+        fs::write(output_path, json)?;
+    }
 
     Ok(())
+}
+
+/// Import from tar.zst archive (#38).
+pub fn import(input: &str) -> io::Result<u64> {
+    config::init_dirs()?;
+    let content_store = open_content_store();
+    let input_path = PathBuf::from(input);
+
+    let file = fs::File::open(&input_path)?;
+    let zstd_decoder =
+        zstd::Decoder::new(file).map_err(|e| io::Error::other(format!("zstd decoder: {e}")))?;
+    let mut archive = tar::Archive::new(zstd_decoder);
+
+    let mut count = 0u64;
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_string_lossy().to_string();
+
+        if path.starts_with("source/") {
+            // source/{name}/{filename}
+            let parts: Vec<&str> = path.splitn(3, '/').collect();
+            if parts.len() == 3 {
+                let source_name = parts[1];
+                let filename = parts[2];
+                let mut content = String::new();
+                entry.read_to_string(&mut content)?;
+                content_store
+                    .write_file(source_name, filename, &content)
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+                count += 1;
+            }
+        }
+    }
+
+    Ok(count)
+}
+
+use std::io::Read as StdRead;
+
+/// Watch a directory for changes and auto-ingest (#36).
+pub fn watch_source(name: &str, raw: &str, format: &str, class: &str) -> io::Result<()> {
+    use notify_debouncer_mini::{new_debouncer, notify::RecursiveMode};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let raw_path = PathBuf::from(raw);
+    if !raw_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("watch path not found: {raw}"),
+        ));
+    }
+
+    // Initial import if source doesn't exist
+    let catalog = open_catalog()?;
+    let exists = catalog
+        .get_source(name)
+        .map_err(|e| io::Error::other(e.to_string()))?
+        .is_some();
+    if !exists {
+        eprintln!("Initial import of '{name}'...");
+        add_source(name, raw, format, class)?;
+    }
+
+    eprintln!("Watching {raw} for changes (Ctrl+C to stop)...");
+
+    let (tx, rx) = mpsc::channel();
+    let mut debouncer = new_debouncer(Duration::from_secs(5), tx)
+        .map_err(|e| io::Error::other(format!("watcher init: {e}")))?;
+
+    debouncer
+        .watcher()
+        .watch(&raw_path, RecursiveMode::Recursive)
+        .map_err(|e| io::Error::other(format!("watch: {e}")))?;
+
+    loop {
+        match rx.recv() {
+            Ok(Ok(events)) => {
+                let changed_count = events.len();
+                if changed_count > 0 {
+                    eprintln!("Changes detected ({changed_count} events), re-syncing...");
+                    match update_source(name, raw) {
+                        Ok(report) => {
+                            eprintln!(
+                                "  New: {}, Changed: {}, Unchanged: {}, Deleted: {}",
+                                report.new_count,
+                                report.changed_count,
+                                report.unchanged_count,
+                                report.deleted_count
+                            );
+                        }
+                        Err(e) => eprintln!("  Sync error: {e}"),
+                    }
+                }
+            }
+            Ok(Err(e)) => eprintln!("Watch error: {e:?}"),
+            Err(e) => {
+                eprintln!("Channel closed: {e}");
+                return Ok(());
+            }
+        }
+    }
 }

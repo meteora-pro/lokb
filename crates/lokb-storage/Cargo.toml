@@ -13,3 +13,7 @@ serde_json = { workspace = true }
 rusqlite = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+zstd = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

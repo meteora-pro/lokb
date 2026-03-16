@@ -7,3 +7,5 @@ description = "Source Viewer (terminal + HTML)"
 
 [dependencies]
 lokb-core = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }

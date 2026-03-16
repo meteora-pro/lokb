@@ -39,13 +39,19 @@ enum Commands {
         #[arg(long)]
         public_only: bool,
     },
-    /// Read a document
+    /// Read a document (TUI viewer if terminal)
     Read {
         /// Document reference (source:document_id)
         doc_ref: String,
         /// Section to read
         #[arg(long)]
         section: Option<String>,
+        /// Highlight text in TUI viewer
+        #[arg(long)]
+        highlight: Option<String>,
+        /// Force plain text output (no TUI)
+        #[arg(long)]
+        plain: bool,
     },
     /// Storage management
     Storage {
@@ -105,18 +111,27 @@ enum Commands {
         source: String,
     },
     /// Start HTTP API server
+    /// Start HTTP API server or MCP server
     Serve {
-        /// Port number
+        /// Port number (HTTP mode)
         #[arg(long, default_value = "7890")]
         port: u16,
+        /// Run as MCP server on stdin/stdout
+        #[arg(long)]
+        mcp: bool,
     },
-    /// Export knowledge base
+    /// Export knowledge base (use .tar.zst for compressed archive)
     Export {
         /// Output file path
         output: String,
         /// Include personal data
         #[arg(long)]
         include_personal: bool,
+    },
+    /// Import from tar.zst archive
+    Import {
+        /// Input archive path
+        input: String,
     },
 }
 
@@ -141,6 +156,9 @@ enum SourceCommands {
         /// Skip embedding generation (faster for large datasets)
         #[arg(long)]
         no_embed: bool,
+        /// Watch directory for changes and auto-sync
+        #[arg(long)]
+        watch: bool,
     },
     /// Update an existing source with new data
     Update {
@@ -203,7 +221,12 @@ fn main() {
             personal_only,
             public_only,
         ),
-        Commands::Read { doc_ref, section } => run_read(&doc_ref, section.as_deref()),
+        Commands::Read {
+            doc_ref,
+            section,
+            highlight,
+            plain,
+        } => run_read(&doc_ref, section.as_deref(), highlight.as_deref(), plain),
         Commands::Storage { command } => run_storage(command),
         Commands::Enrich {
             source,
@@ -225,10 +248,18 @@ fn main() {
         } => run_substring(&pattern, limit, &format),
         Commands::BuildIndex { source } => run_build_index(&source),
         Commands::Serve { port } => run_serve(port),
+        Commands::Serve { port, mcp } => {
+            if mcp {
+                run_mcp()
+            } else {
+                run_serve(port)
+            }
+        }
         Commands::Export {
             output,
             include_personal,
         } => run_export(&output, include_personal),
+        Commands::Import { input } => run_import(&input),
     };
 
     if let Err(e) = result {
@@ -248,6 +279,11 @@ fn run_source(command: SourceCommands) -> Result<(), Box<dyn std::error::Error>>
             no_embed,
         } => {
             let metrics = store::add_source(&name, &raw, &format, &class, no_embed)?;
+            if watch {
+                store::watch_source(&name, &raw, &format, &class)?;
+                return Ok(());
+            }
+            let metrics = store::add_source(&name, &raw, &format, &class)?;
             if output == "json" {
                 println!("{}", serde_json::to_string_pretty(&metrics)?);
             } else {
@@ -350,9 +386,15 @@ fn run_search(
     Ok(())
 }
 
-fn run_read(doc_ref: &str, section: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_read(
+    doc_ref: &str,
+    section: Option<&str>,
+    highlight: Option<&str>,
+    plain: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     let content = store::read_document(doc_ref)?;
-    match section {
+
+    let display_content = match section {
         Some(section_name) => {
             let section_header = format!("## {}", section_name);
             let mut in_section = false;
@@ -376,9 +418,15 @@ fn run_read(doc_ref: &str, section: Option<&str>) -> Result<(), Box<dyn std::err
                 eprintln!("Section '{}' not found", section_name);
                 std::process::exit(1);
             }
-            print!("{output}");
+            output
         }
-        None => print!("{content}"),
+        None => content,
+    };
+
+    if plain {
+        print!("{display_content}");
+    } else {
+        lokb_render::view_document(doc_ref, &display_content, highlight)?;
     }
     Ok(())
 }
@@ -458,6 +506,10 @@ fn run_build_index(source: &str) -> Result<(), Box<dyn std::error::Error>> {
         metrics.text_bytes, metrics.index_bytes
     );
     println!("  Time: {}ms", metrics.build_time_ms);
+}
+
+fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {
+    lokb_serve::mcp::run_mcp_server()?;
     Ok(())
 }
 
@@ -560,5 +612,11 @@ fn run_entity(
 fn run_export(output: &str, include_personal: bool) -> Result<(), Box<dyn std::error::Error>> {
     store::export(output, include_personal)?;
     println!("Exported to {output}");
+    Ok(())
+}
+
+fn run_import(input: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let count = store::import(input)?;
+    println!("Imported {count} files from {input}");
     Ok(())
 }
