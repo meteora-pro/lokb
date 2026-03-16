@@ -110,7 +110,6 @@ enum Commands {
         /// Source name (or "all" for all sources)
         source: String,
     },
-    /// Start HTTP API server
     /// Start HTTP API server or MCP server
     Serve {
         /// Port number (HTTP mode)
@@ -247,7 +246,6 @@ fn main() {
             format,
         } => run_substring(&pattern, limit, &format),
         Commands::BuildIndex { source } => run_build_index(&source),
-        Commands::Serve { port } => run_serve(port),
         Commands::Serve { port, mcp } => {
             if mcp {
                 run_mcp()
@@ -277,13 +275,13 @@ fn run_source(command: SourceCommands) -> Result<(), Box<dyn std::error::Error>>
             class,
             output,
             no_embed,
+            watch,
         } => {
-            let metrics = store::add_source(&name, &raw, &format, &class, no_embed)?;
             if watch {
                 store::watch_source(&name, &raw, &format, &class)?;
                 return Ok(());
             }
-            let metrics = store::add_source(&name, &raw, &format, &class)?;
+            let metrics = store::add_source(&name, &raw, &format, &class, no_embed)?;
             if output == "json" {
                 println!("{}", serde_json::to_string_pretty(&metrics)?);
             } else {
@@ -506,6 +504,7 @@ fn run_build_index(source: &str) -> Result<(), Box<dyn std::error::Error>> {
         metrics.text_bytes, metrics.index_bytes
     );
     println!("  Time: {}ms", metrics.build_time_ms);
+    Ok(())
 }
 
 fn run_mcp() -> Result<(), Box<dyn std::error::Error>> {

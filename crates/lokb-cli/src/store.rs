@@ -2225,7 +2225,7 @@ pub fn watch_source(name: &str, raw: &str, format: &str, class: &str) -> io::Res
         .is_some();
     if !exists {
         eprintln!("Initial import of '{name}'...");
-        add_source(name, raw, format, class)?;
+        add_source(name, raw, format, class, true)?;
     }
 
     eprintln!("Watching {raw} for changes (Ctrl+C to stop)...");
