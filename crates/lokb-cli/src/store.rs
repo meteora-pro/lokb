@@ -148,7 +148,14 @@ pub fn add_source(
     let fts = open_fts()?;
     let chunker = SemanticChunker::default();
 
-    let (doc_count, optimize_time, optimized_bytes, chunks_created, enrichment_time, entities_extracted);
+    let (
+        doc_count,
+        optimize_time,
+        optimized_bytes,
+        chunks_created,
+        enrichment_time,
+        entities_extracted,
+    );
 
     if format == "zim" {
         // Parallel ZIM pipeline: Reader → Workers → Writer with channels
@@ -279,7 +286,9 @@ pub fn add_source(
     let embed_start = std::time::Instant::now();
     let vectors_created = if no_embed || (format == "zim" && doc_count > 50_000) {
         if format == "zim" && doc_count > 50_000 && !no_embed {
-            eprintln!("  Embedding: skipped for large ZIM ({doc_count} docs). Use `lokb enrich` separately.");
+            eprintln!(
+                "  Embedding: skipped for large ZIM ({doc_count} docs). Use `lokb enrich` separately."
+            );
         }
         0
     } else {

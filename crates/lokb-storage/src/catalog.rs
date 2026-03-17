@@ -352,8 +352,14 @@ impl SqliteCatalog {
                     description = COALESCE(excluded.description, entities.description)",
             )
             .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
-        stmt.execute(params![id, canonical_name, description, types_json, ext_json])
-            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        stmt.execute(params![
+            id,
+            canonical_name,
+            description,
+            types_json,
+            ext_json
+        ])
+        .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
         Ok(())
     }
 

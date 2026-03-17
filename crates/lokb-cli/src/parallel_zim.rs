@@ -13,7 +13,7 @@
 //! - Writer: FTS indexing, SQLite catalog, block commits (I/O)
 
 use chrono::Utc;
-use crossbeam_channel::{bounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use lokb_core::{Chunk, ContentHash, ContentType, Document, PrivacyLevel};
 use lokb_ingest::SemanticChunker;
 use lokb_pipeline::Chunker;
@@ -22,8 +22,8 @@ use lokb_storage::{FileContentStore, SqliteCatalog};
 use std::collections::HashMap;
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use uuid::Uuid;
 
 // ── Pipeline data types ──────────────────────────────────────────────
@@ -109,8 +109,8 @@ pub fn ingest_zim_parallel(
     fts: &TantivyIndex,
     config: &PipelineConfig,
 ) -> io::Result<PipelineMetrics> {
-    let reader = lokb_parsers::ZimReader::open(raw_path)
-        .map_err(|e| io::Error::other(e.to_string()))?;
+    let reader =
+        lokb_parsers::ZimReader::open(raw_path).map_err(|e| io::Error::other(e.to_string()))?;
 
     let total_entries = reader.entry_count() as u64;
     eprintln!(
@@ -177,11 +177,7 @@ pub fn ingest_zim_parallel(
 
 // ── Reader thread ────────────────────────────────────────────────────
 
-fn reader_thread(
-    reader: &lokb_parsers::ZimReader,
-    tx: Sender<RawArticle>,
-    shutdown: &AtomicBool,
-) {
+fn reader_thread(reader: &lokb_parsers::ZimReader, tx: Sender<RawArticle>, shutdown: &AtomicBool) {
     for article in reader.article_iter() {
         if shutdown.load(Ordering::Relaxed) {
             eprintln!("ZIM reader: shutdown requested");
@@ -224,7 +220,14 @@ fn worker_thread(
     for raw in rx {
         // catch_unwind: htmd can panic on malformed HTML
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            process_article(&raw, source_id, large_source, extract_entities, privacy_level, &chunker)
+            process_article(
+                &raw,
+                source_id,
+                large_source,
+                extract_entities,
+                privacy_level,
+                &chunker,
+            )
         }));
 
         match result {
@@ -313,9 +316,7 @@ fn writer_thread(
     articles_processed: &AtomicU64,
     start: &std::time::Instant,
 ) -> io::Result<PipelineMetrics> {
-    let mut fts_writer = Some(
-        fts.writer().map_err(|e| io::Error::other(e.to_string()))?,
-    );
+    let mut fts_writer = Some(fts.writer().map_err(|e| io::Error::other(e.to_string()))?);
 
     catalog
         .begin_batch()
@@ -372,13 +373,8 @@ fn writer_thread(
         let t0 = std::time::Instant::now();
         for entity_name in processed.wikilinks.keys() {
             let entity_id = format!("wiki:{}", entity_name.to_lowercase().replace(' ', "_"));
-            let _ = catalog.upsert_entity(
-                &entity_id,
-                entity_name,
-                None,
-                &empty_types,
-                &empty_ext_ids,
-            );
+            let _ =
+                catalog.upsert_entity(&entity_id, entity_name, None, &empty_types, &empty_ext_ids);
             let _ = catalog.add_entity_mention(&entity_id, doc.id, source_id, Some(entity_name));
             entities_count += 1;
         }
@@ -419,9 +415,7 @@ fn writer_thread(
             t_entity = std::time::Duration::ZERO;
             t_hash = std::time::Duration::ZERO;
 
-            fts_writer = Some(
-                fts.writer().map_err(|e| io::Error::other(e.to_string()))?,
-            );
+            fts_writer = Some(fts.writer().map_err(|e| io::Error::other(e.to_string()))?);
 
             catalog
                 .begin_batch()
