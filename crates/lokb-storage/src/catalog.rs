@@ -196,30 +196,32 @@ impl SqliteCatalog {
     pub fn upsert_document(&self, doc: &Document) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let content_type_str = format!("{:?}", doc.content_type);
-        conn.execute(
-            "INSERT INTO documents (id, source_id, external_id, parent_id, depth, title, content_type, language, content_hash, content_size, created_at, indexed_at, privacy_level)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-             ON CONFLICT(source_id, external_id) DO UPDATE SET
-                title = excluded.title,
-                content_hash = excluded.content_hash,
-                content_size = excluded.content_size,
-                indexed_at = excluded.indexed_at",
-            params![
-                doc.id.to_string(),
-                doc.source_id.to_string(),
-                doc.external_id,
-                doc.parent_id.map(|id| id.to_string()),
-                doc.depth,
-                doc.title,
-                content_type_str,
-                doc.language,
-                doc.content_hash.0.as_slice(),
-                doc.content_size,
-                doc.created_at.to_rfc3339(),
-                doc.indexed_at.to_rfc3339(),
-                doc.privacy_level as i32,
-            ],
-        )
+        let mut stmt = conn
+            .prepare_cached(
+                "INSERT INTO documents (id, source_id, external_id, parent_id, depth, title, content_type, language, content_hash, content_size, created_at, indexed_at, privacy_level)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(source_id, external_id) DO UPDATE SET
+                    title = excluded.title,
+                    content_hash = excluded.content_hash,
+                    content_size = excluded.content_size,
+                    indexed_at = excluded.indexed_at",
+            )
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        stmt.execute(params![
+            doc.id.to_string(),
+            doc.source_id.to_string(),
+            doc.external_id,
+            doc.parent_id.map(|id| id.to_string()),
+            doc.depth,
+            doc.title,
+            content_type_str,
+            doc.language,
+            doc.content_hash.0.as_slice(),
+            doc.content_size,
+            doc.created_at.to_rfc3339(),
+            doc.indexed_at.to_rfc3339(),
+            doc.privacy_level as i32,
+        ])
         .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
         Ok(())
     }
@@ -341,15 +343,17 @@ impl SqliteCatalog {
         let conn = self.conn.lock().unwrap();
         let types_json = serde_json::to_string(entity_types)?;
         let ext_json = serde_json::to_string(external_ids)?;
-        conn.execute(
-            "INSERT INTO entities (id, canonical_name, description, entity_types, external_ids, mention_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1)
-             ON CONFLICT(id) DO UPDATE SET
-                mention_count = mention_count + 1,
-                description = COALESCE(excluded.description, entities.description)",
-            params![id, canonical_name, description, types_json, ext_json],
-        )
-        .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        let mut stmt = conn
+            .prepare_cached(
+                "INSERT INTO entities (id, canonical_name, description, entity_types, external_ids, mention_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1)
+                 ON CONFLICT(id) DO UPDATE SET
+                    mention_count = mention_count + 1,
+                    description = COALESCE(excluded.description, entities.description)",
+            )
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        stmt.execute(params![id, canonical_name, description, types_json, ext_json])
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
         Ok(())
     }
 
@@ -362,16 +366,18 @@ impl SqliteCatalog {
         mention_text: Option<&str>,
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR IGNORE INTO entity_mentions (entity_id, document_id, source_id, mention_text)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![
-                entity_id,
-                document_id.to_string(),
-                source_id.to_string(),
-                mention_text,
-            ],
-        )
+        let mut stmt = conn
+            .prepare_cached(
+                "INSERT OR IGNORE INTO entity_mentions (entity_id, document_id, source_id, mention_text)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        stmt.execute(params![
+            entity_id,
+            document_id.to_string(),
+            source_id.to_string(),
+            mention_text,
+        ])
         .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
         Ok(())
     }

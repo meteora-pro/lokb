@@ -37,8 +37,7 @@ struct RawArticle {
 
 /// Processed article from Workers → sent to Writer.
 struct ProcessedArticle {
-    path: String,
-    title: String,
+    doc: Document,
     markdown: String,
     chunks: Vec<Chunk>,
     wikilinks: HashMap<String, u32>,
@@ -151,8 +150,9 @@ pub fn ingest_zim_parallel(
             let rx = reader_rx.clone();
             let tx = writer_tx.clone();
             let ap = articles_processed.clone();
+            let pl = config.privacy_level;
             scope.spawn(move || {
-                worker_thread(rx, tx, source_id, large, extract_ents, &ap);
+                worker_thread(rx, tx, source_id, large, extract_ents, pl, &ap);
             });
         }
         // Drop our copies so writer_rx sees channel close when all workers finish.
@@ -216,6 +216,7 @@ fn worker_thread(
     source_id: Uuid,
     large_source: bool,
     extract_entities: bool,
+    privacy_level: PrivacyLevel,
     counter: &AtomicU64,
 ) {
     let chunker = SemanticChunker::default();
@@ -223,7 +224,7 @@ fn worker_thread(
     for raw in rx {
         // catch_unwind: htmd can panic on malformed HTML
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            process_article(&raw, source_id, large_source, extract_entities, &chunker)
+            process_article(&raw, source_id, large_source, extract_entities, privacy_level, &chunker)
         }));
 
         match result {
@@ -248,6 +249,7 @@ fn process_article(
     source_id: Uuid,
     large_source: bool,
     extract_entities: bool,
+    privacy_level: PrivacyLevel,
     chunker: &SemanticChunker,
 ) -> Option<ProcessedArticle> {
     let markdown = lokb_parsers::html::html_to_markdown(&raw.html);
@@ -263,6 +265,7 @@ fn process_article(
         &markdown
     };
 
+    // Build Document in worker thread (Blake3 hash + UUID are CPU work)
     let doc = Document {
         id: Uuid::now_v7(),
         source_id,
@@ -276,7 +279,7 @@ fn process_article(
         content_size: markdown.len() as u64,
         created_at: Utc::now(),
         indexed_at: Utc::now(),
-        privacy_level: PrivacyLevel::Public,
+        privacy_level,
     };
 
     let chunks = chunker.chunk(&doc, fts_text).unwrap_or_default();
@@ -288,8 +291,7 @@ fn process_article(
     };
 
     Some(ProcessedArticle {
-        path: raw.path.clone(),
-        title: raw.title.clone(),
+        doc,
         markdown,
         chunks,
         wikilinks,
@@ -324,54 +326,63 @@ fn writer_thread(
     let mut entities_count = 0u64;
     let large_source = config.large_source || total_entries > 100_000;
 
+    // Timing accumulators for profiling (per block)
+    let mut t_fts = std::time::Duration::ZERO;
+    let mut t_catalog = std::time::Duration::ZERO;
+    let mut t_files = std::time::Duration::ZERO;
+    let mut t_entity = std::time::Duration::ZERO;
+    let mut t_hash = std::time::Duration::ZERO;
+
+    // Pre-allocate empty HashMap for entity upsert (avoid allocation per call)
+    let empty_ext_ids: HashMap<String, String> = HashMap::new();
+    let empty_types: Vec<String> = Vec::new();
+
     for processed in rx {
+        // Document already built in worker thread (Blake3 hash + UUID computed there)
+        let doc = processed.doc;
+
         // Write sampled files to content store (every 100th for large sources)
         if !large_source || count.is_multiple_of(100) {
-            let filename = format!("{}.md", sanitize_filename(&processed.path));
+            let t0 = std::time::Instant::now();
+            let filename = format!("{}.md", sanitize_filename(&doc.external_id));
             let _ = content_store.write_file(source_name, &filename, &processed.markdown);
+            t_files += t0.elapsed();
         }
 
-        // Build Document for catalog
-        let doc = Document {
-            id: Uuid::now_v7(),
-            source_id,
-            external_id: processed.path,
-            parent_id: None,
-            depth: 0,
-            title: processed.title.clone(),
-            content_type: ContentType::Article,
-            language: None,
-            content_hash: ContentHash::from_bytes(processed.markdown.as_bytes()),
-            content_size: processed.markdown.len() as u64,
-            created_at: Utc::now(),
-            indexed_at: Utc::now(),
-            privacy_level: config.privacy_level,
-        };
+        // hash/doc creation done in worker — timing kept for profiling parity
+        let t0 = std::time::Instant::now();
+        t_hash += t0.elapsed();
 
         // Catalog upsert
+        let t0 = std::time::Instant::now();
         catalog
             .upsert_document(&doc)
             .map_err(|e| io::Error::other(e.to_string()))?;
+        t_catalog += t0.elapsed();
 
         // FTS index chunks
+        let t0 = std::time::Instant::now();
         if let Some(ref mut w) = fts_writer {
-            w.add_chunks(&processed.chunks, source_name, &processed.title)
+            w.add_chunks(&processed.chunks, source_name, &doc.title)
                 .map_err(|e| io::Error::other(e.to_string()))?;
         }
+        t_fts += t0.elapsed();
 
         // Entity extraction
+        let t0 = std::time::Instant::now();
         for entity_name in processed.wikilinks.keys() {
             let entity_id = format!("wiki:{}", entity_name.to_lowercase().replace(' ', "_"));
             let _ = catalog.upsert_entity(
                 &entity_id,
                 entity_name,
                 None,
-                &[],
-                &HashMap::new(),
+                &empty_types,
+                &empty_ext_ids,
             );
             let _ = catalog.add_entity_mention(&entity_id, doc.id, source_id, Some(entity_name));
             entities_count += 1;
         }
+        t_entity += t0.elapsed();
 
         count += 1;
 
@@ -392,8 +403,21 @@ fn writer_thread(
             let processed_total = articles_processed.load(Ordering::Relaxed);
             eprintln!(
                 "ZIM: block {block_num} — {count} written, {processed_total} processed, \
-                 {chunks_in_block} chunks ({rate} written/s)"
+                 {chunks_in_block} chunks ({rate}/s) \
+                 [fts={:.0}ms cat={:.0}ms hash={:.0}ms ent={:.0}ms files={:.0}ms]",
+                t_fts.as_millis(),
+                t_catalog.as_millis(),
+                t_hash.as_millis(),
+                t_entity.as_millis(),
+                t_files.as_millis(),
             );
+
+            // Reset timers for next block
+            t_fts = std::time::Duration::ZERO;
+            t_catalog = std::time::Duration::ZERO;
+            t_files = std::time::Duration::ZERO;
+            t_entity = std::time::Duration::ZERO;
+            t_hash = std::time::Duration::ZERO;
 
             fts_writer = Some(
                 fts.writer().map_err(|e| io::Error::other(e.to_string()))?,
