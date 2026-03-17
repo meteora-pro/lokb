@@ -30,6 +30,9 @@ zstd = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-mini = { workspace = true }
 lokb-render = { path = "../lokb-render" }
+crossbeam-channel = { workspace = true }
+num_cpus = { workspace = true }
+ctrlc = { workspace = true }
 
 [dev-dependencies]
 cucumber = "0.22"
