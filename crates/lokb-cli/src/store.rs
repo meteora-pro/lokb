@@ -77,6 +77,7 @@ pub fn add_source(
     format: &str,
     class: &str,
     no_embed: bool,
+    threads: Option<usize>,
 ) -> io::Result<IngestMetrics> {
     use std::time::Instant;
     let total_start = Instant::now();
@@ -142,100 +143,149 @@ pub fn add_source(
         .add_source(&source)
         .map_err(|e| io::Error::other(e.to_string()))?;
 
-    // Phase 1: Optimize — ingest raw files into content store
-    let optimize_start = Instant::now();
-    let doc_count = ingest_raw(&raw_path, format, name, &content_store, source_id, &catalog)?;
-    let optimize_time = optimize_start.elapsed();
+    // For ZIM format: block-based pipeline (manages FTS writer internally)
+    // For other formats: two-phase pipeline (Phase 1: ingest, Phase 2: enrich)
+    let fts = open_fts()?;
+    let chunker = SemanticChunker::default();
+
+    let (doc_count, optimize_time, optimized_bytes, chunks_created, enrichment_time, entities_extracted);
+
+    if format == "zim" {
+        // Parallel ZIM pipeline: Reader → Workers → Writer with channels
+        let start = Instant::now();
+        let mut config = crate::parallel_zim::PipelineConfig::default();
+        if let Some(t) = threads {
+            config.threads = t.max(1);
+        }
+        config.privacy_level = if class == "personal" {
+            PrivacyLevel::Private
+        } else {
+            PrivacyLevel::Public
+        };
+        let metrics = crate::parallel_zim::ingest_zim_parallel(
+            &raw_path,
+            name,
+            &content_store,
+            source_id,
+            &catalog,
+            &fts,
+            &config,
+        )?;
+        doc_count = metrics.doc_count;
+        entities_extracted = metrics.entities_count;
+        optimize_time = start.elapsed();
+        optimized_bytes = content_store.source_size(name);
+
+        chunks_created = 0;
+        enrichment_time = std::time::Duration::ZERO;
+    } else {
+        let mut fts_writer = fts.writer().map_err(|e| io::Error::other(e.to_string()))?;
+        // Phase 1: Optimize — ingest raw files into content store
+        let optimize_start = Instant::now();
+        doc_count = ingest_raw(&raw_path, format, name, &content_store, source_id, &catalog)?;
+        optimize_time = optimize_start.elapsed();
+        optimized_bytes = content_store.source_size(name);
+
+        // Phase 2: Enrichment — chunk and build FTS index (single commit)
+        let enrichment_start = std::time::Instant::now();
+
+        let files = content_store
+            .list_files(name)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+
+        for (filename, content) in &files {
+            let title = extract_doc_title(content, filename);
+            let doc = lokb_core::Document {
+                id: Uuid::now_v7(),
+                source_id,
+                external_id: filename.clone(),
+                parent_id: None,
+                depth: 0,
+                title: title.clone(),
+                content_type: if format == "telegram-export" {
+                    ContentType::Conversation
+                } else {
+                    ContentType::Article
+                },
+                language: None,
+                content_hash: ContentHash::from_bytes(content.as_bytes()),
+                content_size: content.len() as u64,
+                created_at: Utc::now(),
+                indexed_at: Utc::now(),
+                privacy_level: if class == "personal" {
+                    PrivacyLevel::Private
+                } else {
+                    PrivacyLevel::Public
+                },
+            };
+            let chunks = chunker
+                .chunk(&doc, content)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            fts_writer
+                .add_chunks(&chunks, name, &title)
+                .map_err(|e| io::Error::other(e.to_string()))?;
+        }
+
+        chunks_created = fts_writer
+            .commit()
+            .map_err(|e| io::Error::other(e.to_string()))? as u64;
+        enrichment_time = enrichment_start.elapsed();
+
+        // Entity extraction from [[wikilinks]] (ADR-007 Pattern 1)
+        entities_extracted = extract_entities_from_files(&files, source_id, &catalog);
+    }
 
     // Update document count
     catalog
         .update_source_doc_count(source_id, doc_count)
         .map_err(|e| io::Error::other(e.to_string()))?;
 
-    let optimized_bytes = content_store.source_size(name);
-
-    // Phase 2: Enrichment — chunk and build FTS index (single commit)
-    let enrichment_start = std::time::Instant::now();
-    let fts = open_fts()?;
-    let chunker = SemanticChunker::default();
-    let mut fts_writer = fts.writer().map_err(|e| io::Error::other(e.to_string()))?;
-
-    let files = content_store
-        .list_files(name)
-        .map_err(|e| io::Error::other(e.to_string()))?;
-
-    for (filename, content) in &files {
-        let title = extract_doc_title(content, filename);
-        let doc = lokb_core::Document {
-            id: Uuid::now_v7(),
-            source_id,
-            external_id: filename.clone(),
-            parent_id: None,
-            depth: 0,
-            title: title.clone(),
-            content_type: if format == "telegram-export" {
-                ContentType::Conversation
-            } else {
-                ContentType::Article
-            },
-            language: None,
-            content_hash: ContentHash::from_bytes(content.as_bytes()),
-            content_size: content.len() as u64,
-            created_at: Utc::now(),
-            indexed_at: Utc::now(),
-            privacy_level: if class == "personal" {
-                PrivacyLevel::Private
-            } else {
-                PrivacyLevel::Public
-            },
-        };
-        let chunks = chunker
-            .chunk(&doc, content)
-            .map_err(|e| io::Error::other(e.to_string()))?;
-        fts_writer
-            .add_chunks(&chunks, name, &title)
-            .map_err(|e| io::Error::other(e.to_string()))?;
-    }
-
-    let chunks_created = fts_writer
-        .commit()
-        .map_err(|e| io::Error::other(e.to_string()))? as u64;
-    let enrichment_time = enrichment_start.elapsed();
-
-    // Phase 3: Entity extraction from [[wikilinks]] (ADR-007 Pattern 1)
-    let entities_extracted = extract_entities_from_files(&files, source_id, &catalog);
-
     if entities_extracted > 0 {
         eprintln!("  Entities: {entities_extracted} extracted from wikilinks");
     }
 
-    // Phase 4: FM-index (substring search, ADR-008)
-    let fm_path = config::derived_dir().join("fmindex");
-    let fm_index =
-        lokb_search::SubstringIndex::open(&fm_path).map_err(|e| io::Error::other(e.to_string()))?;
-    let fm_titles: Vec<String> = files.iter().map(|(f, t)| extract_doc_title(t, f)).collect();
-    let fm_docs: Vec<(&str, &str, &str)> = files
-        .iter()
-        .zip(fm_titles.iter())
-        .map(|((_, text), title)| (name, title.as_str(), text.as_str()))
-        .collect();
-    match fm_index.build(&fm_docs) {
-        Ok(m) => {
-            if m.documents > 0 {
-                eprintln!(
-                    "  FM-index: {}ms ({} docs, {} bytes)",
-                    m.build_time_ms, m.documents, m.index_bytes
-                );
+    // Phase 4: FM-index — skip for large ZIM (use `lokb build-index` separately)
+    if format != "zim" || doc_count < 50_000 {
+        let files = content_store
+            .list_files(name)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let fm_path = config::derived_dir().join("fmindex");
+        let fm_index = lokb_search::SubstringIndex::open(&fm_path)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let fm_titles: Vec<String> = files.iter().map(|(f, t)| extract_doc_title(t, f)).collect();
+        let fm_docs: Vec<(&str, &str, &str)> = files
+            .iter()
+            .zip(fm_titles.iter())
+            .map(|((_, text), title)| (name, title.as_str(), text.as_str()))
+            .collect();
+        match fm_index.build(&fm_docs) {
+            Ok(m) => {
+                if m.documents > 0 {
+                    eprintln!(
+                        "  FM-index: {}ms ({} docs, {} bytes)",
+                        m.build_time_ms, m.documents, m.index_bytes
+                    );
+                }
             }
+            Err(e) => eprintln!("  FM-index skipped: {e}"),
         }
-        Err(e) => eprintln!("  FM-index skipped: {e}"),
+    } else {
+        eprintln!(
+            "  FM-index: skipped for large dataset ({doc_count} docs). Use `lokb build-index` to build separately."
+        );
     }
 
-    // Phase 5: Optional embedding (skip with --no-embed for large datasets)
+    // Phase 5: Optional embedding (skip with --no-embed or large ZIM)
     let embed_start = std::time::Instant::now();
-    let vectors_created = if no_embed {
+    let vectors_created = if no_embed || (format == "zim" && doc_count > 50_000) {
+        if format == "zim" && doc_count > 50_000 && !no_embed {
+            eprintln!("  Embedding: skipped for large ZIM ({doc_count} docs). Use `lokb enrich` separately.");
+        }
         0
     } else {
+        let files = content_store
+            .list_files(name)
+            .map_err(|e| io::Error::other(e.to_string()))?;
         match embed_chunks(name, &files, format, class, &chunker) {
             Ok(count) => count,
             Err(e) => {
@@ -764,7 +814,7 @@ fn ingest_pdf_dir(
     Ok(count)
 }
 
-/// Extract articles from ZIM file (Wikipedia offline dump).
+/// Legacy wrapper for non-ZIM formats (used by ingest_raw).
 fn ingest_zim(
     raw_path: &Path,
     source_name: &str,
@@ -775,18 +825,11 @@ fn ingest_zim(
     let reader =
         lokb_parsers::ZimReader::open(raw_path).map_err(|e| io::Error::other(e.to_string()))?;
 
-    eprintln!(
-        "ZIM: {} entries, {} clusters",
-        reader.entry_count(),
-        reader.cluster_count()
-    );
-
-    let articles = reader.articles();
-    eprintln!("ZIM: {} HTML articles found", articles.len());
+    let articles = reader.article_iter();
+    eprintln!("ZIM: ~{} entries (lazy iteration)", reader.entry_count());
 
     let mut count = 0u64;
-    for article in &articles {
-        // Convert HTML → Markdown
+    for article in articles {
         let markdown = lokb_parsers::html::html_to_markdown(&article.content);
         if markdown.trim().is_empty() {
             continue;
@@ -812,7 +855,7 @@ fn ingest_zim(
             depth: 0,
             title,
             content_type: ContentType::Article,
-            language: Some("en".to_string()),
+            language: None,
             content_hash: ContentHash::from_bytes(markdown.as_bytes()),
             content_size: markdown.len() as u64,
             created_at: Utc::now(),
@@ -1476,8 +1519,8 @@ fn extract_doc_title(content: &str, filename: &str) -> String {
 }
 
 fn extract_snippet(content: &str, pos: usize, max_len: usize) -> String {
-    let start = pos.saturating_sub(max_len / 2);
-    let end = (pos + max_len / 2).min(content.len());
+    let start = content.floor_char_boundary(pos.saturating_sub(max_len / 2));
+    let end = content.ceil_char_boundary((pos + max_len / 2).min(content.len()));
     let snippet = &content[start..end];
     let snippet = snippet.trim();
     if start > 0 {
@@ -2225,7 +2268,7 @@ pub fn watch_source(name: &str, raw: &str, format: &str, class: &str) -> io::Res
         .is_some();
     if !exists {
         eprintln!("Initial import of '{name}'...");
-        add_source(name, raw, format, class, true)?;
+        add_source(name, raw, format, class, true, None)?;
     }
 
     eprintln!("Watching {raw} for changes (Ctrl+C to stop)...");

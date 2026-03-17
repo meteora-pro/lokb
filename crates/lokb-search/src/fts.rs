@@ -83,10 +83,10 @@ impl TantivyIndex {
     pub fn writer(&self) -> Result<FtsBatchWriter<'_>> {
         let writer = self
             .index
-            .writer(100_000_000) // 100MB buffer for bulk
+            .writer(50_000_000) // 50MB buffer
             .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
         Ok(FtsBatchWriter {
-            writer,
+            writer: Some(writer),
             index: self,
             count: 0,
         })
@@ -188,14 +188,15 @@ impl TantivyIndex {
 
 /// Batch writer for efficient bulk indexing. Commit once after all documents.
 pub struct FtsBatchWriter<'a> {
-    writer: IndexWriter,
+    writer: Option<IndexWriter>,
     index: &'a TantivyIndex,
     count: usize,
 }
 
 impl<'a> FtsBatchWriter<'a> {
-    /// Add chunks to the batch (no commit yet).
+    /// Add chunks to the batch (no commit — caller controls commit timing).
     pub fn add_chunks(&mut self, chunks: &[Chunk], source_name: &str, title: &str) -> Result<()> {
+        let writer = self.writer.as_mut().expect("writer already committed");
         for chunk in chunks {
             let mut doc = doc!(
                 self.index.f_chunk_id => chunk.id.to_string(),
@@ -210,7 +211,7 @@ impl<'a> FtsBatchWriter<'a> {
             if let Some(section) = &chunk.section_path {
                 doc.add_text(self.index.f_section, section);
             }
-            self.writer
+            writer
                 .add_document(doc)
                 .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
             self.count += 1;
@@ -218,16 +219,21 @@ impl<'a> FtsBatchWriter<'a> {
         Ok(())
     }
 
-    /// Commit all batched documents and reload reader.
+    /// Commit all batched documents, drop writer (releases Tantivy lock),
+    /// then reload reader for search availability.
     pub fn commit(mut self) -> Result<usize> {
-        self.writer
-            .commit()
-            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        let count = self.count;
+        if let Some(mut writer) = self.writer.take() {
+            writer
+                .commit()
+                .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+            // writer is dropped here, releasing the Tantivy lock
+        }
         self.index
             .reader
             .reload()
             .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
-        Ok(self.count)
+        Ok(count)
     }
 }
 

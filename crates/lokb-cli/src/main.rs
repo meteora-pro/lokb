@@ -1,3 +1,4 @@
+mod parallel_zim;
 mod store;
 
 use clap::{Parser, Subcommand};
@@ -155,6 +156,9 @@ enum SourceCommands {
         /// Skip embedding generation (faster for large datasets)
         #[arg(long)]
         no_embed: bool,
+        /// Number of parallel worker threads for ingestion (default: num_cpus/2)
+        #[arg(long)]
+        threads: Option<usize>,
         /// Watch directory for changes and auto-sync
         #[arg(long)]
         watch: bool,
@@ -275,13 +279,14 @@ fn run_source(command: SourceCommands) -> Result<(), Box<dyn std::error::Error>>
             class,
             output,
             no_embed,
+            threads,
             watch,
         } => {
             if watch {
                 store::watch_source(&name, &raw, &format, &class)?;
                 return Ok(());
             }
-            let metrics = store::add_source(&name, &raw, &format, &class, no_embed)?;
+            let metrics = store::add_source(&name, &raw, &format, &class, no_embed, threads)?;
             if output == "json" {
                 println!("{}", serde_json::to_string_pretty(&metrics)?);
             } else {

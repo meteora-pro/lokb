@@ -50,10 +50,10 @@ impl OptimizeStep for HtmlToMarkdown {
 
 /// Convert HTML to Markdown using htmd.
 pub fn html_to_markdown(html: &str) -> String {
-    htmd::convert(html).unwrap_or_else(|_| {
-        // Fallback: strip tags manually
-        strip_html_tags(html)
-    })
+    // htmd can panic on invalid UTF-8 boundaries in some HTML documents.
+    // Use catch_unwind to gracefully fall back to tag stripping.
+    std::panic::catch_unwind(|| htmd::convert(html).unwrap_or_else(|_| strip_html_tags(html)))
+        .unwrap_or_else(|_| strip_html_tags(html))
 }
 
 /// Simple fallback: strip HTML tags.

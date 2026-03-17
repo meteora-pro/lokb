@@ -24,5 +24,8 @@ memmap2 = { workspace = true }
 xz2 = { workspace = true }
 zstd = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

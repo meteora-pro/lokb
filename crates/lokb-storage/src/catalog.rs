@@ -19,6 +19,23 @@ impl SqliteCatalog {
         Ok(catalog)
     }
 
+    /// Begin an explicit transaction for batch operations.
+    /// Call `commit_batch()` when done. Dramatically speeds up bulk inserts.
+    pub fn begin_batch(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("BEGIN TRANSACTION")
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Commit the current batch transaction.
+    pub fn commit_batch(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch("COMMIT")
+            .map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     pub fn open_in_memory() -> Result<Self> {
         let conn =
             Connection::open_in_memory().map_err(|e| lokb_core::Error::Storage(e.to_string()))?;
