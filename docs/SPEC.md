@@ -1,7 +1,7 @@
 # lokb — Local Offline Knowledge Base
 
 **Полное техническое задание v4.0**
-**Язык:** Rust | **Лицензия:** Apache-2.0 / MIT dual
+**Язык:** Rust | **Лицензия:** Apache-2.0
 
 ---
 

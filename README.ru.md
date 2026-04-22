@@ -3,7 +3,7 @@
 [English](README.md) | [Русский](README.ru.md)
 
 [![CI](https://github.com/meteora-pro/lokb/actions/workflows/ci.yml/badge.svg)](https://github.com/meteora-pro/lokb/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 Персональная **офлайн-первая база знаний** на Rust. Объединяет публичные данные (Wikipedia, Wikidata, книги, статьи) и личные данные (чаты, заметки, фото, GPS) в единую поисковую систему с полнотекстовым поиском, семантическим поиском и графом знаний.
 
@@ -169,4 +169,4 @@ cargo run -p lokb-cli -- <cmd>        # запуск CLI
 
 ## Лицензия
 
-MIT
+Apache 2.0

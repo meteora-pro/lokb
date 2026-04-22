@@ -3,7 +3,7 @@
 [English](README.md) | [Русский](README.ru.md)
 
 [![CI](https://github.com/meteora-pro/lokb/actions/workflows/ci.yml/badge.svg)](https://github.com/meteora-pro/lokb/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 A personal **offline-first knowledge base** written in Rust. Combines public data (Wikipedia, Wikidata, books, articles) and personal data (chats, notes, photos, GPS) into a unified search system with full-text search, semantic search, and a knowledge graph.
 
@@ -169,4 +169,4 @@ cargo run -p lokb-cli -- <cmd>        # run CLI
 
 ## License
 
-MIT
+Apache 2.0
